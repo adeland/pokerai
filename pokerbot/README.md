@@ -47,35 +47,38 @@ Optimized Self-Play (6-Player):
 ```bash
 python main.py --mode train --iterations 5000 --output_dir ./models/optimized_6max --checkpoint_freq 500 --num_players 6 --optimized --num_workers 4
 ```
+```bash
 --iterations: Number of training iterations. More iterations generally yield stronger strategies but require more time.
 --output_dir: Directory to save strategy checkpoints and the final strategy (final_strategy.pkl).
 --checkpoint_freq: How often to save intermediate models.
 --num_players: Set to 6 for 6-max training.
 --optimized: Use the parallel OptimizedSelfPlayTrainer.
 --num_workers: Number of CPU cores for parallel training.
+```
 
 2. Playing Against the Bot
 Play interactively against trained bots.
 ```bash
 python main.py --mode play --strategy ./models/optimized_6max/final_strategy.pkl --num_opponents 5 --opponent human --use_dls --search_depth 2
 ```
-
+```bash
 --strategy: Path to the saved strategy file (.pkl).
 --num_opponents: Number of bot opponents (total players = this + 1 human).
 --opponent: Set to human for interactive play. Can also be random (play vs random bots) or bot (watch bots play each other).
 --use_dls: (Optional) Enable Depth-Limited Search for the bot(s).
 --search_depth: (Optional) Set the lookahead depth for DLS.
+```
 3. Evaluating the Bot
 Measure the performance of a trained strategy.
 ```bash
 python main.py --mode evaluate --strategy ./models/optimized_6max/final_strategy.pkl --num_games 1000 --num_opponents 5 --use_dls
 ```
-
+```bash
 --strategy: Path to the strategy file to evaluate.
 --num_games: Number of hands to simulate for evaluation against random opponents.
 --num_opponents: Number of random opponents in evaluation games.
 --use_dls: (Optional) Evaluate the bot using DLS.
-
+```
 4. Running Tests
 Execute validation tests to ensure core components function correctly.
 ```bash
@@ -83,24 +86,45 @@ python main.py --mode test
 ```
 
 Project Structure
-main.py: Command-line interface entry point.
-game_engine/: Core poker game mechanics (Card, Deck, HandEvaluator, GameState, Player, PokerGame).
-cfr/: Counterfactual Regret Minimization implementation (CFRTrainer, InformationSet, Abstraction classes).
-bot/: Bot agent logic (BotPlayer, DepthLimitedSearch, BotEvaluator).
-training/: Training infrastructure (OptimizedSelfPlayTrainer).
-utils/: Testing scripts and utility functions (simple_test.py).
-models/: (Default) Directory for saving trained strategies.
-research/: (Optional) Contains background research files (cfr_research.md, etc.).
-Core Concepts
-Counterfactual Regret Minimization (CFR): An iterative algorithm designed to find approximate Nash equilibria in large imperfect information games. It works by repeatedly traversing the game tree, calculating the regret (how much better an action would have performed in hindsight), and adjusting strategy probabilities to minimize cumulative regret over time.
-Depth-Limited Search (DLS): A real-time search technique used during gameplay. Instead of relying solely on the pre-computed CFR blueprint strategy, DLS performs a limited lookahead search (e.g., using an MCTS-like approach) from the current public game state, potentially biasing the search with the blueprint, to arrive at a more refined action for the specific situation.
-Abstraction (Card & Action): Techniques essential for making NLHE computationally tractable.
-Card Abstraction: Groups strategically similar hands (e.g., based on strength, potential, board texture) into buckets, reducing the number of distinct card states.
-Action Abstraction: Reduces the infinite number of possible bet sizes in NLHE to a smaller, representative set (e.g., fixed fractions of the pot, all-in).
-Performance & Tuning (via CLI)
-Training Iterations (--iterations): More iterations generally produce stronger, less exploitable strategies but increase training time proportionally.
-Optimized Training (--optimized, --num_workers): Utilize multi-core systems for significantly faster training via parallel self-play simulations.
-Abstraction Granularity: (Currently adjusted in code) Finer-grained abstractions (more buckets in CardAbstraction, more bet sizes in ActionAbstraction) can improve strategy quality but drastically increase the state space size and training time.
-Depth-Limited Search (--use_dls, --search_depth): Enabling DLS (--use_dls) improves real-time decision-making but increases computation time per action. Deeper search (--search_depth) offers potentially stronger play at the cost of performance.
-
+.
+├── main.py                 # CLI Entry Point
+├── requirements.txt        # Project dependencies
+├── setup.py                # Packaging script (optional)
+├── README.md               # This file
+├── models/                 # Default directory for trained strategies
+├── research/               # Background research documents (optional)
+│   ├── cfr_research.md
+│   └── ...
+└── organized_poker_bot/
+    ├── __init__.py
+    ├── game_engine/        # Core poker rules and state
+    │   ├── __init__.py
+    │   ├── card.py
+    │   ├── deck.py
+    │   ├── game_state.py
+    │   ├── hand_evaluator.py
+    │   ├── player.py
+    │   └── poker_game.py
+    ├── cfr/                # Counterfactual Regret Minimization
+    │   ├── __init__.py
+    │   ├── cfr_trainer.py
+    │   ├── information_set.py
+    │   ├── abstraction.py  # Base/Old abstraction (verify usage)
+    │   ├── card_abstraction.py
+    │   ├── action_abstraction.py
+    │   └── enhanced_card_abstraction.py
+    ├── bot/                # Bot agent implementation
+    │   ├── __init__.py
+    │   ├── bot_player.py
+    │   ├── depth_limited_search.py
+    │   ├── bot_evaluator.py
+    │   └── bot_optimizer.py # (If used)
+    ├── training/           # Training infrastructure
+    │   ├── __init__.py
+    │   ├── optimized_self_play_trainer.py
+    │   └── ...
+    └── utils/              # Utilities and tests
+        ├── __init__.py
+        └── simple_test.py
+        └── test_integration.py # (If used)
 
