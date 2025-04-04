@@ -84,7 +84,7 @@ Execute validation tests to ensure core components function correctly.
 ```bash
 python main.py --mode test
 ```
-
+```bash
 Project Structure
 .
 ├── main.py                 # CLI Entry Point
@@ -127,4 +127,5 @@ Project Structure
         ├── __init__.py
         └── simple_test.py
         └── test_integration.py # (If used)
+```
 
