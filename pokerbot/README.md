@@ -1,159 +1,106 @@
-# NLH 6-Max Poker Bot
+# 6-Max No-Limit Hold'em Poker Bot: A CFR/DLS Implementation
 
-A No-Limit Hold'em 6-max poker bot implementation using Counterfactual Regret Minimization (CFR) and depth-limited search.
+This repository contains a high-quality implementation of a No-Limit Hold'em (NLHE) poker bot designed for 6-max games. The approach draws inspiration from groundbreaking work like Pluribus, utilizing Counterfactual Regret Minimization (CFR) for generating a robust blueprint strategy and Depth-Limited Search (DLS) for real-time refinement during play. The focus is on applying rigorous game-theoretic algorithms to solve imperfect information games.
 
-## Features
+## Key Features
 
-- **Counterfactual Regret Minimization (CFR)**: Advanced algorithm for training poker strategies
-- **Depth-Limited Search**: Real-time search to refine the blueprint strategy during gameplay
-- **Enhanced Card Abstraction**: Potential-aware clustering for better hand representation
-- **Action Abstraction**: Realistic bet sizing for different betting rounds
-- **Optimized Self-Play Training**: Parallel processing and linear CFR for faster convergence
-- **Comprehensive Game Engine**: Complete implementation of No-Limit Hold'em rules
+*   **Counterfactual Regret Minimization (CFR):** Employs CFR variants for computing near-equilibrium strategies in the complex 6-max NLHE domain.
+*   **Blueprint Strategy:** CFR training generates a comprehensive strategy profile covering numerous game states.
+*   **Depth-Limited Search (Optional):** Integrates real-time search (inspired by Pluribus) to refine blueprint strategy decisions based on the exact game state encountered during play.
+*   **Card Abstraction:** Utilizes enhanced potential-aware card abstraction techniques (`EnhancedCardAbstraction`) to group strategically similar hands, managing state space complexity.
+*   **Action Abstraction:** Implements techniques to abstract the continuous action space of NLHE into a manageable set of discrete betting options.
+*   **Optimized Training:** Supports optimized self-play training leveraging parallel processing (`OptimizedSelfPlayTrainer`) for faster convergence on multi-core systems.
+*   **Comprehensive Game Engine:** Includes a detailed game engine (`game_engine`) accurately modeling NLHE rules for 2-6 players.
+*   **Command-Line Interface:** Provides a flexible CLI (`main.py`) for training, evaluation, playing against the bot, and running validation tests.
+*   **Validation & Evaluation:** Includes testing utilities (`simple_test.py`, `test_integration.py`) and evaluation tools (`BotEvaluator`) to verify implementation correctness and measure performance.
 
-Install the required dependencies:
+## Installation
+
+1.  **Clone the Repository:**
+    ```bash
+    git clone <your-repository-url>
+    cd organized_poker_bot # Or your repository's root directory name
+    ```
+2.  **Install Dependencies:** Ensure you have Python 3.7+ installed. Then, install the required libraries using pip:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(Note: If `requirements.txt` is inside a subdirectory, adjust the path accordingly)*
+
+## Usage (Command-Line Interface)
+
+The primary interface is `main.py`. Use `--help` to see all available options:
+
 ```bash
-pip install -r requirements.txt
+python main.py --help
 ```
 
-## Project Structure
+1. Training the Bot
+Train a blueprint strategy using CFR.
 
-- **Game Engine**: Core poker game mechanics
-  - `card.py`: Card representation
-  - `deck.py`: Deck of cards with shuffling and dealing
-  - `game_state.py`: Game state representation
-  - `hand_evaluator.py`: Hand strength evaluation
-  - `player.py`: Base player class
-  - `poker_game.py`: Main game loop
+Standard CFR (2-Player Example - Extend Trainer for 6):
+```bash
+python main.py --mode train --iterations 10000 --output_dir ./models/cfr_blueprint --checkpoint_freq 1000 --num_players 2
+```
+(Note: The current CFRTrainer in main.py seems geared towards 2 players. Adaptation for direct 6-player standard CFR might be needed)
+Optimized Self-Play (6-Player):
+```bash
+python main.py --mode train --iterations 5000 --output_dir ./models/optimized_6max --checkpoint_freq 500 --num_players 6 --optimized --num_workers 4
+```
+--iterations: Number of training iterations. More iterations generally yield stronger strategies but require more time.
+--output_dir: Directory to save strategy checkpoints and the final strategy (final_strategy.pkl).
+--checkpoint_freq: How often to save intermediate models.
+--num_players: Set to 6 for 6-max training.
+--optimized: Use the parallel OptimizedSelfPlayTrainer.
+--num_workers: Number of CPU cores for parallel training.
 
-- **CFR Implementation**: Counterfactual Regret Minimization algorithm
-  - `abstraction.py`: Base abstraction class
-  - `action_abstraction.py`: Action abstraction techniques
-  - `card_abstraction.py`: Card abstraction techniques
-  - `enhanced_card_abstraction.py`: Advanced card abstraction with potential-aware clustering
-  - `cfr_strategy.py`: Strategy representation
-  - `cfr_trainer.py`: CFR training algorithm
-  - `information_set.py`: Information set representation
-
-- **Bot Implementation**: Poker bot using CFR and depth-limited search
-  - `bot_player.py`: Bot player implementation
-  - `depth_limited_search.py`: Real-time search for strategy refinement
-  - `bot_evaluator.py`: Bot performance evaluation
-  - `bot_optimizer.py`: Bot parameter optimization
-
-- **Training**: Training and self-play
-  - `train.py`: Main training script
-  - `self_play_trainer.py`: Self-play training
-  - `optimized_self_play_trainer.py`: Optimized self-play with parallel processing
-
-## Usage
-
-### Training a Bot
-
-To train a poker bot using CFR:
-
-```python
-from cfr_trainer import CFRTrainer
-from game_state import GameState
-
-# Create a CFR trainer
-trainer = CFRTrainer(
-    game_state_class=lambda num_players: GameState(num_players),
-    num_players=6
-)
-
-# Train for 1000 iterations
-strategy = trainer.train(
-    iterations=1000,
-    checkpoint_freq=100,
-    output_dir="models"
-)
+2. Playing Against the Bot
+Play interactively against trained bots.
+```bash
+python main.py --mode play --strategy ./models/optimized_6max/final_strategy.pkl --num_opponents 5 --opponent human --use_dls --search_depth 2
 ```
 
-### Using the Bot
-
-To use a trained bot in a game:
-
-```python
-from bot_player import BotPlayer
-from poker_game import PokerGame
-from player import Player
-
-# Load a trained strategy
-from cfr_strategy import CFRStrategy
-strategy = CFRStrategy()
-strategy.load("models/strategy_1000.pkl")
-
-# Create a bot player
-bot = BotPlayer(
-    strategy=strategy,
-    use_depth_limited_search=True,
-    search_depth=2,
-    search_iterations=1000
-)
-
-# Create a game with the bot and human players
-players = [bot]
-for i in range(5):
-    players.append(Player(f"Player {i+1}"))
-
-# Create and run the game
-game = PokerGame(players=players, small_blind=50, big_blind=100)
-game.run()
+--strategy: Path to the saved strategy file (.pkl).
+--num_opponents: Number of bot opponents (total players = this + 1 human).
+--opponent: Set to human for interactive play. Can also be random (play vs random bots) or bot (watch bots play each other).
+--use_dls: (Optional) Enable Depth-Limited Search for the bot(s).
+--search_depth: (Optional) Set the lookahead depth for DLS.
+3. Evaluating the Bot
+Measure the performance of a trained strategy.
+```bash
+python main.py --mode evaluate --strategy ./models/optimized_6max/final_strategy.pkl --num_games 1000 --num_opponents 5 --use_dls
 ```
 
-### Enhanced Features
+--strategy: Path to the strategy file to evaluate.
+--num_games: Number of hands to simulate for evaluation against random opponents.
+--num_opponents: Number of random opponents in evaluation games.
+--use_dls: (Optional) Evaluate the bot using DLS.
 
-#### Using Enhanced Card Abstraction
-
-```python
-from enhanced_card_abstraction import EnhancedCardAbstraction
-
-# Train clustering models (only needed once)
-EnhancedCardAbstraction.train_clustering_models()
-
-# Use in a bot
-from bot_player import BotPlayer
-from cfr_strategy import CFRStrategy
-
-strategy = CFRStrategy()
-strategy.load("models/strategy_1000.pkl")
-
-# Create a bot with enhanced features
-bot = BotPlayer(
-    strategy=strategy,
-    use_depth_limited_search=True,
-    search_depth=2,
-    search_iterations=1000
-)
+4. Running Tests
+Execute validation tests to ensure core components function correctly.
+```bash
+python main.py --mode test
 ```
 
-#### Optimized Self-Play Training
+Project Structure
+main.py: Command-line interface entry point.
+game_engine/: Core poker game mechanics (Card, Deck, HandEvaluator, GameState, Player, PokerGame).
+cfr/: Counterfactual Regret Minimization implementation (CFRTrainer, InformationSet, Abstraction classes).
+bot/: Bot agent logic (BotPlayer, DepthLimitedSearch, BotEvaluator).
+training/: Training infrastructure (OptimizedSelfPlayTrainer).
+utils/: Testing scripts and utility functions (simple_test.py).
+models/: (Default) Directory for saving trained strategies.
+research/: (Optional) Contains background research files (cfr_research.md, etc.).
+Core Concepts
+Counterfactual Regret Minimization (CFR): An iterative algorithm designed to find approximate Nash equilibria in large imperfect information games. It works by repeatedly traversing the game tree, calculating the regret (how much better an action would have performed in hindsight), and adjusting strategy probabilities to minimize cumulative regret over time.
+Depth-Limited Search (DLS): A real-time search technique used during gameplay. Instead of relying solely on the pre-computed CFR blueprint strategy, DLS performs a limited lookahead search (e.g., using an MCTS-like approach) from the current public game state, potentially biasing the search with the blueprint, to arrive at a more refined action for the specific situation.
+Abstraction (Card & Action): Techniques essential for making NLHE computationally tractable.
+Card Abstraction: Groups strategically similar hands (e.g., based on strength, potential, board texture) into buckets, reducing the number of distinct card states.
+Action Abstraction: Reduces the infinite number of possible bet sizes in NLHE to a smaller, representative set (e.g., fixed fractions of the pot, all-in).
+Performance & Tuning (via CLI)
+Training Iterations (--iterations): More iterations generally produce stronger, less exploitable strategies but increase training time proportionally.
+Optimized Training (--optimized, --num_workers): Utilize multi-core systems for significantly faster training via parallel self-play simulations.
+Abstraction Granularity: (Currently adjusted in code) Finer-grained abstractions (more buckets in CardAbstraction, more bet sizes in ActionAbstraction) can improve strategy quality but drastically increase the state space size and training time.
+Depth-Limited Search (--use_dls, --search_depth): Enabling DLS (--use_dls) improves real-time decision-making but increases computation time per action. Deeper search (--search_depth) offers potentially stronger play at the cost of performance.
 
-```python
-from optimized_self_play_trainer import OptimizedSelfPlayTrainer
-from game_state import GameState
 
-# Create an optimized self-play trainer
-trainer = OptimizedSelfPlayTrainer(
-    game_state_class=lambda num_players: GameState(num_players),
-    num_players=6,
-    num_workers=4  # Use 4 CPU cores
-)
-
-# Train using optimized self-play
-strategy = trainer.train(
-    iterations=1000,
-    checkpoint_freq=100,
-    output_dir="models"
-)
-```
-
-## Performance Tuning
-
-For best performance:
-
-1. **Training Time**: Longer training (more iterations) generally produces stronger strategies
-2. **Abstraction Granularity**: More buckets in card abstraction improves strategy quality but increases training time
-3. **Depth-Limited Search**: Deeper search improves real-time decisions but requires more computation
-4. **Parallel Processing**: Use more workers for faster training on multi-core systems
