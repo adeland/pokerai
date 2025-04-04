@@ -7,7 +7,7 @@ This repository contains a implementation of a No-Limit Hold'em (NLHE) poker bot
 
 *   **Counterfactual Regret Minimization (CFR):** Employs CFR variants for computing near-equilibrium strategies in the complex 6-max NLHE domain.
 *   **Blueprint Strategy:** CFR training generates a comprehensive strategy profile covering numerous game states.
-*   **Depth-Limited Search (Optional):** Integrates real-time search (inspired by Pluribus) to refine blueprint strategy decisions based on the exact game state encountered during play.
+*   **Depth-Limited Search (Optional):** Integrates real-time search to refine blueprint strategy decisions based on the exact game state encountered during play.
 *   **Card Abstraction:** Utilizes enhanced potential-aware card abstraction techniques (`EnhancedCardAbstraction`) to group strategically similar hands, managing state space complexity.
 *   **Action Abstraction:** Implements techniques to abstract the continuous action space of NLHE into a manageable set of discrete betting options.
 *   **Optimized Training:** Supports optimized self-play training leveraging parallel processing (`OptimizedSelfPlayTrainer`) for faster convergence on multi-core systems.
