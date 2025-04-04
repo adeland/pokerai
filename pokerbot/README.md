@@ -1,4 +1,5 @@
 # 6-Max No-Limit Hold'em Poker Bot: A CFR/DLS Implementation
+♠️♥️♣️♦️
 
 This repository contains a implementation of a No-Limit Hold'em (NLHE) poker bot designed for 6-max games. The approach draws inspiration from work like Pluribus, utilizing Counterfactual Regret Minimization (CFR) for generating a blueprint strategy and Depth-Limited Search (DLS) for real-time refinement during play.
 
