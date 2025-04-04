@@ -20,7 +20,7 @@ This repository contains a implementation of a No-Limit Hold'em (NLHE) poker bot
 1.  **Clone the Repository:**
     ```bash
     git clone <your-repository-url>
-    cd pokerbot # Or your repository's root directory name
+    cd organized_poker_bot
     ```
 2.  **Install Dependencies:** Ensure you have Python 3.7+ installed. Then, install the required libraries using pip:
     ```bash
