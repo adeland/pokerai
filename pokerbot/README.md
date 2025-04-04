@@ -1,6 +1,6 @@
 # NLH 6-Max Poker Bot
 
-A high-quality No-Limit Hold'em 6-max poker bot implementation inspired by Pluribus, using Counterfactual Regret Minimization (CFR) and depth-limited search.
+A No-Limit Hold'em 6-max poker bot implementation using Counterfactual Regret Minimization (CFR) and depth-limited search.
 
 ## Features
 
@@ -11,15 +11,7 @@ A high-quality No-Limit Hold'em 6-max poker bot implementation inspired by Pluri
 - **Optimized Self-Play Training**: Parallel processing and linear CFR for faster convergence
 - **Comprehensive Game Engine**: Complete implementation of No-Limit Hold'em rules
 
-## Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/poker-bot.git
-cd poker-bot
-```
-
-2. Install the required dependencies:
+Install the required dependencies:
 ```bash
 pip install -r requirements.txt
 ```
@@ -165,27 +157,3 @@ For best performance:
 2. **Abstraction Granularity**: More buckets in card abstraction improves strategy quality but increases training time
 3. **Depth-Limited Search**: Deeper search improves real-time decisions but requires more computation
 4. **Parallel Processing**: Use more workers for faster training on multi-core systems
-
-## Comparison to Pluribus
-
-This implementation includes key features from Pluribus:
-
-1. **Counterfactual Regret Minimization**: Core algorithm for strategy training
-2. **Depth-Limited Search**: Real-time search for strategy refinement
-3. **Abstraction Techniques**: Card and action abstraction to reduce complexity
-4. **Self-Play Training**: Learning through playing against itself
-
-While not an exact replica, this implementation captures the essential elements that make Pluribus strong.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- The Pluribus paper: "Superhuman AI for multiplayer poker" by Brown and Sandholm
-- The CFR algorithm: "Regret Minimization in Games with Incomplete Information" by Zinkevich et al.
