@@ -19,7 +19,7 @@ This repository contains a high-quality implementation of a No-Limit Hold'em (NL
 1.  **Clone the Repository:**
     ```bash
     git clone <your-repository-url>
-    cd organized_poker_bot # Or your repository's root directory name
+    cd pokerbot # Or your repository's root directory name
     ```
 2.  **Install Dependencies:** Ensure you have Python 3.7+ installed. Then, install the required libraries using pip:
     ```bash
