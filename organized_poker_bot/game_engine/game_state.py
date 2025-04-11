@@ -59,52 +59,47 @@ class GameState:
 
     # --- Helper Methods ---
     def _get_next_active_player(self, start_idx):
-        """ Finds the next player index who is still active (not folded, has stack). """
-        if not self.active_players or self.num_players == 0:
-            return None
-        # Ensure start_idx is valid before using it
+        if not self.active_players or self.num_players == 0: return None
         valid_start = start_idx if 0 <= start_idx < self.num_players else -1
-        # Start search from the player *after* start_idx
         current_idx = (valid_start + 1) % self.num_players
-        search_start_idx = current_idx # Where the search begins in the loop
+        search_start_idx = current_idx # Track start of search loop
 
-        # Loop up to num_players times to check everyone once
-        for _ in range(self.num_players):
-            # Check list bounds and player state
-            if 0 <= current_idx < self.num_players and \
-               current_idx < len(self.player_stacks) and \
-               current_idx < len(self.player_folded) and \
-               current_idx < len(self.player_all_in) and \
-               not self.player_folded[current_idx] and \
-               not self.player_all_in[current_idx] and \
-               self.player_stacks[current_idx] > 0.01: # Check stack > 0
-                return current_idx # Found next active player
+        for _ in range(self.num_players * 2): # Limit loops to avoid infinite
+             # Check if player index is valid and player is actually active and has chips
+             if current_idx in self.active_players and \
+                0 <= current_idx < len(self.player_stacks) and \
+                self.player_stacks[current_idx] > 0.01 and \
+                not self.player_folded[current_idx]: # Double check not folded
+                 return current_idx # Found next active player
 
-            current_idx = (current_idx + 1) % self.num_players
-            # No need to check for wrap-around explicitly, range(num_players) handles it
+             current_idx = (current_idx + 1) % self.num_players
+             if current_idx == search_start_idx: # Have we looped completely?
+                  # print(f"DEBUG _get_next_active: Looped from {start_idx}, ended at {current_idx}") # DEBUG
+                  break # Exit loop if we made a full circle
 
-        # If loop completes without finding anyone, return None
-        return None
+        # print(f"DEBUG _get_next_active: FAILED from {start_idx}, returning None") # DEBUG
+        return None # No active player found
 
     def _find_player_relative_to_dealer(self, offset):
-        """ Finds an active player at a specific offset from the dealer. """
-        if not self.active_players or self.num_players == 0:
-            return None
-        # Ensure dealer position is valid
+        if not self.active_players or self.num_players == 0: return None
         dealer = self.dealer_position % self.num_players
         start_idx = (dealer + offset) % self.num_players
         current_idx = start_idx
+        search_start_idx = current_idx # Track start of search loop
 
-        for _ in range(self.num_players): # Loop once around the table
-             # Check list bounds and player state (must have chips, can be folded for finding blinds)
-            if 0 <= current_idx < self.num_players and \
-               current_idx < len(self.player_stacks) and \
+        for _ in range(self.num_players * 2):
+            # Check if player index valid, active, and has chips (NO folded check needed here, just find POTENTIAL seat)
+            if current_idx in self.active_players and \
+               0 <= current_idx < len(self.player_stacks) and \
                self.player_stacks[current_idx] > 0.01:
-                return current_idx # Found a player with chips at this position
+                 return current_idx # Found an active player at relative position
 
             current_idx = (current_idx + 1) % self.num_players
-            # No need for explicit wrap-around check
+            if current_idx == search_start_idx: # Have we looped?
+                 # print(f"DEBUG _find_relative: Looped for offset {offset}, Dlr={dealer}, start={start_idx}") # DEBUG
+                 break
 
+        # print(f"DEBUG _find_relative: FAILED for offset {offset}, Dlr={dealer}, returning None") # DEBUG
         return None # No suitable player found
 
     # --- Hand Setup Methods ---
@@ -322,7 +317,12 @@ class GameState:
                  first_player_to_act = self._get_next_active_player(bb_player if bb_player is not None else self.dealer_position)
         else: # Postflop rounds: First active Player left of dealer acts first
             first_player_to_act = self._get_next_active_player(self.dealer_position)
-
+        if first_player_to_act is None:
+             print(f"!!! WARN _start_betting_round: FAILED to find first_player_to_act (Rnd={self.betting_round}, Dlr={self.dealer_position}, Active={self.active_players}, Stacks={self.player_stacks})")
+             self.current_player_idx = -1
+        else:
+             # print(f"    DEBUG _start: Setting current_player_idx = {first_player_to_act}")
+             self.current_player_idx = first_player_to_act
         # Set current player index
         self.current_player_idx = first_player_to_act if first_player_to_act is not None else -1
 

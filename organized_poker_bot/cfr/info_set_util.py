@@ -21,7 +21,7 @@ except ImportError as e:
 
 # Configuration Flags (Match Trainer's defaults or desired setup)
 USE_CARD_ABSTRACTION = True
-USE_ENHANCED_CARD_ABSTRACTION = False # Set to True if you trained Enhanced models and want to use them
+USE_ENHANCED_CARD_ABSTRACTION = True
 
 def generate_info_set_key(game_state, player_idx):
     """

@@ -25,7 +25,7 @@ class ActionAbstraction:
 
     # Define desired sizings
     # For opening BETS (first aggressive action on street) - Fractions of POT
-    POT_FRACTIONS_BET = [0.33, 0.5, 0.75, 1.0]
+    POT_FRACTIONS_BET = [0.33, 0.5, 0.75, 1.0, 1.25]
     # For RAISES (when facing a bet/raise) - Multipliers of LAST RAISE AMOUNT
     # e.g., 2.5 means raise TO current_bet + 2.5 * last_raise_amount
     RAISE_MULTIPLIERS = [2.5, 3.5] # Example multipliers (can add 4.0 if needed)

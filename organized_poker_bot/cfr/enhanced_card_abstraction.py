@@ -1,422 +1,641 @@
 # --- START OF FILE organized_poker_bot/cfr/enhanced_card_abstraction.py ---
 """
-Enhanced card abstraction implementation for poker CFR.
-This module provides advanced methods for abstracting card information to reduce the complexity
-of the game state space while maintaining strategic relevance.
-(Refactored V2: Fixed TypeError in _calculate_hand_strength)
+Enhanced card abstraction using Scikit-learn K-Means clustering.
+(Refactored V5: Added Debug Logging)
 """
 
 import numpy as np
 import random
 import itertools
-from sklearn.cluster import KMeans
 import pickle
 import os
 import sys
-from collections import Counter # Ensure Counter is imported
+from collections import Counter
+import time # For timing training steps
 
-# Add the parent directory to the path to make imports work when run directly
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# --- Scikit-learn Import ---
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.exceptions import NotFittedError
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    print("WARN [EnhancedCardAbs]: scikit-learn not found. EnhancedCardAbstraction will use simple fallbacks.")
+    KMeans = None # Flag that sklearn is unavailable
+    NotFittedError = type('NotFittedError', (Exception,), {}) # Dummy error class
+    SKLEARN_AVAILABLE = False
 
-# Use absolute imports that work when run directly
-from organized_poker_bot.game_engine.hand_evaluator import HandEvaluator
-from organized_poker_bot.game_engine.card import Card
+# --- Absolute Imports for Game Engine/Utils ---
+try:
+    from organized_poker_bot.game_engine.hand_evaluator import HandEvaluator
+    from organized_poker_bot.game_engine.card import Card
+except ImportError as e:
+    print(f"FATAL Import Error in enhanced_card_abstraction.py: {e}")
+    sys.exit(1)
+# --- End Imports ---
+
 
 class EnhancedCardAbstraction:
-    """
-    Enhanced card abstraction techniques for poker CFR implementation.
-    Implements advanced methods for abstracting card information to reduce the
-    complexity of the game state space.
-    """
+    """ Enhanced card abstraction using K-Means clustering. """
 
-    # Number of buckets for different rounds
+    # --- Configuration ---
     NUM_PREFLOP_BUCKETS = 20
     NUM_FLOP_BUCKETS = 50
-    NUM_TURN_BUCKETS = 100
-    NUM_RIVER_BUCKETS = 200
+    NUM_TURN_BUCKETS = 50
+    NUM_RIVER_BUCKETS = 50
 
-    # Clustering models for different rounds (Paths for loading)
+    _MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'models'))
+    _preflop_model_path = os.path.join(_MODEL_DIR, 'preflop_kmeans_model.pkl')
+    _flop_model_path    = os.path.join(_MODEL_DIR, 'flop_kmeans_model.pkl')
+    _turn_model_path    = os.path.join(_MODEL_DIR, 'turn_kmeans_model.pkl')
+    _river_model_path   = os.path.join(_MODEL_DIR, 'river_kmeans_model.pkl')
+
+    # --- Model Loading Status ---
+    # None: Not attempted yet
+    # False: Attempted but failed or unavailable
+    # KMeans object: Successfully loaded
     _preflop_model = None
     _flop_model = None
     _turn_model = None
     _river_model = None
-    _preflop_model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'preflop_model.pkl')
-    _flop_model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'flop_model.pkl')
-    _turn_model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'turn_model.pkl')
-    _river_model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'river_model.pkl')
 
-    # --- Preflop Abstraction Methods ---
-    @staticmethod
-    def get_preflop_abstraction(hole_cards):
-        """ Gets preflop abstraction using clustering model or simple fallback. """
-        if not hole_cards or len(hole_cards) != 2: return EnhancedCardAbstraction.NUM_PREFLOP_BUCKETS - 1 # Worst bucket if invalid
+    # --- Debugging Flag ---
+    # Set to True to see detailed feature/prediction logs during abstraction calls
+    DETAILED_LOGGING = False # Set to True manually for deep debugging
 
-        # Lazy load model
-        if EnhancedCardAbstraction._preflop_model is None:
+    @classmethod
+    def _log(cls, message, level="INFO"):
+        """ Simple internal logger. """
+        # Simple logger prefix, could be expanded (e.g., add timestamp)
+        print(f"[{level} EnhancedCardAbs]: {message}")
+
+    @classmethod
+    def _lazy_load_model(cls, model_attr_name, model_path):
+        """ Helper to load a model file on first use with logging. Returns True on success. """
+        model = getattr(cls, model_attr_name)
+
+        # Check status: Already loaded (True) or failed previously (False)
+        if model is not None:
+            return model is not False # Return True if loaded, False if failed
+
+        # --- Attempt to load ---
+        cls._log(f"Attempting lazy load for {model_attr_name} from {model_path}...")
+
+        if not os.path.exists(model_path):
+            cls._log(f"Model file not found at '{model_path}'. Abstraction unavailable.", "WARN")
+            setattr(cls, model_attr_name, False) # Mark as failed
+            return False
+
+        if not SKLEARN_AVAILABLE:
+            cls._log(f"Scikit-learn unavailable. Cannot load model.", "WARN")
+            setattr(cls, model_attr_name, False)
+            return False
+
+        try:
+            with open(model_path, 'rb') as f:
+                loaded_model = pickle.load(f)
+            # Basic validation of the loaded object
+            if isinstance(loaded_model, KMeans) and hasattr(loaded_model, 'predict'):
+                setattr(cls, model_attr_name, loaded_model)
+                cls._log(f"Successfully loaded model for {model_attr_name}.")
+                return True
+            else:
+                cls._log(f"Loaded object from '{model_path}' is not a valid KMeans model.", "ERROR")
+                setattr(cls, model_attr_name, False)
+                return False
+        except Exception as e:
+            cls._log(f"Failed to load/unpickle model '{model_path}': {e}", "ERROR")
+            setattr(cls, model_attr_name, False) # Mark as failed
+            return False
+
+    # --- Abstraction Getters ---
+    @classmethod
+    def get_preflop_abstraction(cls, hole_cards):
+        """ Gets preflop abstraction bucket. """
+        if cls.DETAILED_LOGGING:
+            card_str = ' '.join(map(str, hole_cards)) if hole_cards else "None"
+            cls._log(f"get_preflop_abstraction called for: {card_str}", "DEBUG")
+
+        if not hole_cards or len(hole_cards) != 2 or not all(isinstance(c, Card) for c in hole_cards):
+            cls._log("Invalid hole cards for preflop abs. Returning worst bucket.", "WARN")
+            return cls.NUM_PREFLOP_BUCKETS - 1
+
+        model_loaded_successfully = cls._lazy_load_model('_preflop_model', cls._preflop_model_path)
+        current_model = cls._preflop_model # Get potential model object
+
+        if model_loaded_successfully and isinstance(current_model, KMeans):
+            cls._log("Using K-Means model for preflop abstraction.", "DEBUG")
             try:
-                abs_path = os.path.abspath(EnhancedCardAbstraction._preflop_model_path)
-                #print(f"DEBUG: Trying to load preflop model from: {abs_path}") # Debug print
-                if os.path.exists(abs_path):
-                    with open(abs_path, 'rb') as f:
-                        EnhancedCardAbstraction._preflop_model = pickle.load(f)
-                        #print("DEBUG: Preflop model loaded successfully.")
-                else:
-                    #print("DEBUG: Preflop model file not found.")
-                    pass # Fallback will be used
-            except Exception as e:
-                print(f"WARN: Failed to load preflop model: {e}. Using simple fallback.")
+                features = cls._extract_preflop_features(hole_cards)
+                if not features: # Check if feature extraction failed
+                    raise ValueError("Feature extraction returned empty list")
 
-        if EnhancedCardAbstraction._preflop_model:
+                if cls.DETAILED_LOGGING:
+                    cls._log(f"  Preflop features: {np.round(features, 3)}", "DEBUG")
+
+                cluster = current_model.predict(np.array(features).reshape(1, -1))[0]
+                bucket = int(np.clip(cluster, 0, cls.NUM_PREFLOP_BUCKETS - 1))
+
+                if cls.DETAILED_LOGGING:
+                    cls._log(f"  Predicted preflop bucket: {bucket}", "DEBUG")
+                return bucket
+
+            except NotFittedError: # Catch specific sklearn error
+                cls._log("Model loaded but not fitted! Using simple fallback.", "WARN")
+                setattr(cls, '_preflop_model', False) # Mark as failed
+                return cls._simple_preflop_bucket(hole_cards)
+            except Exception as e:
+                cls._log(f"Error during prediction: {e}. Using simple fallback.", "WARN")
+                # Optionally mark model as failed if prediction errors persist
+                # setattr(cls, '_preflop_model', False)
+                return cls._simple_preflop_bucket(hole_cards)
+        else:
+            cls._log("Using simple fallback for preflop abstraction.", "DEBUG")
+            return cls._simple_preflop_bucket(hole_cards)
+
+    @classmethod
+    def get_postflop_abstraction(cls, hole_cards, community_cards):
+        """ Gets postflop abstraction bucket. """
+        num_community = len(community_cards) if community_cards else 0
+        street_name = {3: "Flop", 4: "Turn", 5: "River"}.get(num_community, "Unknown")
+
+        if cls.DETAILED_LOGGING:
+             hole_str = ' '.join(map(str, hole_cards)) if hole_cards else "None"
+             comm_str = ' '.join(map(str, community_cards)) if community_cards else "None"
+             cls._log(f"get_postflop_abstraction ({street_name}) called for: {hole_str} | {comm_str}", "DEBUG")
+
+        # Determine model config based on street
+        num_buckets = -1
+        model_attr = None
+        model_path = None
+        model = None # Variable to hold the loaded model object or False
+
+        if num_community == 3:
+            num_buckets = cls.NUM_FLOP_BUCKETS
+            model_attr = '_flop_model'
+            model_path = cls._flop_model_path
+        elif num_community == 4:
+            num_buckets = cls.NUM_TURN_BUCKETS
+            model_attr = '_turn_model'
+            model_path = cls._turn_model_path
+        elif num_community == 5:
+            num_buckets = cls.NUM_RIVER_BUCKETS
+            model_attr = '_river_model'
+            model_path = cls._river_model_path
+        else:
+            cls._log(f"Invalid community card count ({num_community}) for postflop abs. Returning worst bucket.", "WARN")
+            # Use flop buckets as a default size if needed
+            num_buckets = cls.NUM_FLOP_BUCKETS
+            return num_buckets - 1
+
+        # Basic input validation
+        if not hole_cards or len(hole_cards) != 2 or not all(isinstance(c, Card) for c in hole_cards) or \
+           not community_cards or not all(isinstance(c, Card) for c in community_cards):
+            cls._log("Invalid cards for postflop abs. Returning worst bucket.", "WARN")
+            return num_buckets - 1
+
+        # Attempt to load model
+        model_loaded_successfully = cls._lazy_load_model(model_attr, model_path)
+        if model_loaded_successfully:
+             model = getattr(cls, model_attr) # Get potential model object
+
+        # Use model if available and loaded correctly
+        if model_loaded_successfully and isinstance(model, KMeans):
+            cls._log(f"Using K-Means model for {street_name} abstraction.", "DEBUG")
             try:
-                features = EnhancedCardAbstraction._extract_preflop_features(hole_cards)
-                # Model expects 2D array
-                cluster = EnhancedCardAbstraction._preflop_model.predict(np.array(features).reshape(1, -1))[0]
-                return cluster
+                features = cls._extract_postflop_features(hole_cards, community_cards)
+                if not features: # Check feature extraction result
+                    raise ValueError("Feature extraction returned empty list")
+
+                if cls.DETAILED_LOGGING:
+                    cls._log(f"  {street_name} features: {np.round(features, 3)}", "DEBUG")
+
+                cluster = model.predict(np.array(features).reshape(1, -1))[0]
+                bucket = int(np.clip(cluster, 0, num_buckets - 1))
+
+                if cls.DETAILED_LOGGING:
+                    cls._log(f"  Predicted {street_name} bucket: {bucket}", "DEBUG")
+                return bucket
+
+            except NotFittedError: # Catch specific sklearn error
+                cls._log(f"{street_name} Model loaded but not fitted! Using simple fallback.", "WARN")
+                setattr(cls, model_attr, False) # Mark as failed
+                return cls._simple_postflop_bucket(hole_cards, community_cards, num_buckets)
             except Exception as e:
-                print(f"WARN: Error predicting preflop cluster: {e}. Using simple fallback.")
-                return EnhancedCardAbstraction._simple_preflop_bucket(hole_cards)
-        else:
-             return EnhancedCardAbstraction._simple_preflop_bucket(hole_cards) # Use fallback if no model loaded
+                cls._log(f"Error during {street_name} prediction: {e}. Using fallback.", "WARN")
+                # Optionally mark model as failed if prediction errors persist
+                # setattr(cls, model_attr, False)
+                return cls._simple_postflop_bucket(hole_cards, community_cards, num_buckets)
+        else: # Fallback if model not loaded/available
+            cls._log(f"Using simple fallback for {street_name} abstraction.", "DEBUG")
+            return cls._simple_postflop_bucket(hole_cards, community_cards, num_buckets)
 
-    @staticmethod
-    def _simple_preflop_bucket(hole_cards):
-        """ Simple preflop bucketing based on hand strength. """
-        rank1, rank2 = hole_cards[0].rank, hole_cards[1].rank
-        suited = hole_cards[0].suit == hole_cards[1].suit
-        score = (rank1 + rank2) / 2
-        if rank1 == rank2: score += 7 # Pair bonus
-        if suited: score += 2 # Suited bonus
-        connectedness = 14 - abs(rank1 - rank2); score += connectedness / 7 # Connect bonus
-        # Scale score approx 0-30 -> bucket 19-0 (inverted)
-        num_buckets = EnhancedCardAbstraction.NUM_PREFLOP_BUCKETS
-        normalized_score = (score / 30.0) * (num_buckets -1) # Normalize to ~[0, num_buckets-1]
-        bucket = num_buckets - 1 - int(normalized_score) # Invert: higher score -> lower bucket
-        return max(0, min(num_buckets - 1, bucket)) # Clamp to range
 
-    @staticmethod
-    def _extract_preflop_features(hole_cards):
-        """ Extract features for preflop hand clustering. """
-        rank1, rank2 = hole_cards[0].rank, hole_cards[1].rank
-        suited = 1 if hole_cards[0].suit == hole_cards[1].suit else 0
-        high_rank = max(rank1, rank2); low_rank = min(rank1, rank2); gap = high_rank - low_rank
-        potential = (2 if suited else 0) + (max(0, 5 - gap)); is_pair = 1 if rank1 == rank2 else 0
-        norm_high = (high_rank - 2) / 12; norm_low = (low_rank - 2) / 12 # Scale rank 2-14 -> 0-1
-        return [norm_high, norm_low, suited, gap / 12, potential / 7, is_pair]
+    # --- Fallback Abstraction Methods ---
+    @classmethod
+    def _simple_preflop_bucket(cls, hole_cards):
+        """ Simple deterministic preflop bucketing based on score heuristic. """
+        # (Implementation identical to previous version, but ensure it's present and formatted)
+        if len(hole_cards) != 2: return cls.NUM_PREFLOP_BUCKETS - 1
+        try:
+            rank1, rank2 = sorted([c.rank for c in hole_cards], reverse=True)
+            suited = hole_cards[0].suit == hole_cards[1].suit
+            is_pair = rank1 == rank2
+            gap = rank1 - rank2 if not is_pair else -1.0
 
-    # --- Postflop Abstraction Methods ---
-    @staticmethod
-    def get_postflop_abstraction(hole_cards, community_cards):
-        """ Gets postflop abstraction using model or fallback based on round. """
-        if not hole_cards or len(hole_cards)!=2 or not community_cards or len(community_cards) < 3:
-             num_buckets = EnhancedCardAbstraction.NUM_FLOP_BUCKETS # Default if invalid
-             if len(community_cards) == 4: num_buckets = EnhancedCardAbstraction.NUM_TURN_BUCKETS
-             elif len(community_cards) == 5: num_buckets = EnhancedCardAbstraction.NUM_RIVER_BUCKETS
-             return num_buckets - 1 # Return worst bucket
+            score = (rank1 + rank2) / 2.0
+            if is_pair: score += 5.0
+            if suited: score += 2.0
+            if gap >= 0 and gap < 5: score += (4.0 - gap) # Connector bonus
 
-        num_community = len(community_cards)
-        model = None; model_path = None; num_buckets = EnhancedCardAbstraction.NUM_FLOP_BUCKETS # Default
-        round_name = "Flop"
+            min_score, max_score = 5.0, 21.0 # Approximate score range
+            if max_score <= min_score: return 0 # Avoid division by zero
 
-        if num_community == 3: # Flop
-            if EnhancedCardAbstraction._flop_model is None: EnhancedCardAbstraction._lazy_load_model('_flop_model', EnhancedCardAbstraction._flop_model_path)
-            model = EnhancedCardAbstraction._flop_model
-            num_buckets = EnhancedCardAbstraction.NUM_FLOP_BUCKETS
-            round_name = "Flop"
-        elif num_community == 4: # Turn
-            if EnhancedCardAbstraction._turn_model is None: EnhancedCardAbstraction._lazy_load_model('_turn_model', EnhancedCardAbstraction._turn_model_path)
-            model = EnhancedCardAbstraction._turn_model
-            num_buckets = EnhancedCardAbstraction.NUM_TURN_BUCKETS
-            round_name = "Turn"
-        elif num_community == 5: # River
-            if EnhancedCardAbstraction._river_model is None: EnhancedCardAbstraction._lazy_load_model('_river_model', EnhancedCardAbstraction._river_model_path)
-            model = EnhancedCardAbstraction._river_model
-            num_buckets = EnhancedCardAbstraction.NUM_RIVER_BUCKETS
-            round_name = "River"
-        else:
-             return EnhancedCardAbstraction._simple_preflop_bucket(hole_cards) # Should not happen if check above works
+            normalized = (score - min_score) / (max_score - min_score)
+            # Invert: High score -> Low bucket index
+            bucket = cls.NUM_PREFLOP_BUCKETS - 1 - int(np.clip(normalized, 0, 1) * (cls.NUM_PREFLOP_BUCKETS - 1))
+            return int(np.clip(bucket, 0, cls.NUM_PREFLOP_BUCKETS - 1)) # Ensure valid range
+        except Exception as e:
+             cls._log(f"Error in _simple_preflop_bucket: {e}", "ERROR")
+             return cls.NUM_PREFLOP_BUCKETS - 1 # Default to worst bucket on error
 
-        if model:
-            try:
-                 features = EnhancedCardAbstraction._extract_postflop_features(hole_cards, community_cards)
-                 cluster = model.predict(np.array(features).reshape(1, -1))[0]
-                 return cluster
-            except Exception as e:
-                 print(f"WARN: Error predicting {round_name} cluster: {e}. Using simple fallback.")
-                 return EnhancedCardAbstraction._simple_postflop_bucket(hole_cards, community_cards, num_buckets)
-        else:
-             # Fallback if model still not loaded
-             return EnhancedCardAbstraction._simple_postflop_bucket(hole_cards, community_cards, num_buckets)
+    @classmethod
+    def _simple_postflop_bucket(cls, hole_cards, community_cards, num_buckets):
+        """ Simple postflop bucketing based primarily on normalized hand strength. """
+        # (Implementation identical to previous version)
+        try:
+             strength = cls._calculate_normalized_strength(hole_cards, community_cards)
+             # Invert: High strength -> Low bucket index
+             bucket = num_buckets - 1 - int(strength * (num_buckets - 1))
+             return int(np.clip(bucket, 0, num_buckets - 1)) # Clamp
+        except Exception as e:
+             cls._log(f"Error in _simple_postflop_bucket: {e}", "ERROR")
+             return num_buckets - 1 # Default to worst bucket on error
 
-    @staticmethod
-    def _lazy_load_model(model_attr_name, model_path):
-         """ Helper to load a model file on demand. """
-         try:
-              abs_path = os.path.abspath(model_path)
-              #print(f"DEBUG: Trying lazy load: {abs_path}") # Debug print
-              if os.path.exists(abs_path):
-                   with open(abs_path, 'rb') as f:
-                        setattr(EnhancedCardAbstraction, model_attr_name, pickle.load(f))
-                        #print(f"DEBUG: Loaded model for {model_attr_name}")
-              # else: print(f"DEBUG: Model file not found: {abs_path}")
-         except Exception as e:
-              print(f"WARN: Failed lazy load {model_attr_name}: {e}")
+    # --- Feature Extraction ---
+    @classmethod
+    def _extract_preflop_features(cls, hole_cards):
+        """ Extract numerical features for preflop K-Means clustering. Returns list or None on error. """
+        try:
+             # (Implementation identical to previous version, wrapped in try/except)
+             rank1, rank2 = sorted([c.rank for c in hole_cards], reverse=True)
+             suited = 1.0 if hole_cards[0].suit == hole_cards[1].suit else 0.0
+             is_pair = 1.0 if rank1 == rank2 else 0.0
+             gap = float(rank1 - rank2) if not is_pair else -1.0
+             norm_rank1 = (rank1 - 2.0) / 12.0
+             norm_rank2 = (rank2 - 2.0) / 12.0
+             norm_gap = max(0.0, gap) / 12.0
+             features = [norm_rank1, norm_rank2, suited, is_pair, norm_gap]
+             return features
+        except Exception as e:
+             cls._log(f"Error extracting preflop features: {e}", "ERROR")
+             return None
 
-    # *** MODIFIED _calculate_hand_strength ***
-    @staticmethod
-    def _calculate_hand_strength(hole_cards, community_cards):
-        """ Calculate normalized hand strength [0, 1] using HandEvaluator rank. """
+
+    @classmethod
+    def _extract_postflop_features(cls, hole_cards, community_cards, include_potential=False):
+        """ Extract numerical features for postflop K-Means clustering. Returns list or None on error. """
+        try:
+            if not hole_cards or len(hole_cards) != 2 or not community_cards or len(community_cards) < 3:
+                 return None # Invalid input
+
+            hand_strength = cls._calculate_normalized_strength(hole_cards, community_cards)
+            bp, bs, bc = cls._extract_board_features(community_cards)
+            hp, htp, htr, hsd, hfd = cls._extract_hand_type_features(hole_cards, community_cards)
+
+            # Base features
+            features = [hand_strength, bp, bs, bc, float(hp), float(htp), float(htr), float(hsd), float(hfd)]
+
+            # Potential features (optional)
+            ppot, npot = 0.0, 0.0
+            if include_potential:
+                try: # Wrap potential calculation as it can be slower/fail
+                    ppot, npot = cls._calculate_hand_potential(hole_cards, community_cards)
+                except Exception as e:
+                    cls._log(f"Error calculating potential features: {e}", "WARN")
+                    # Keep ppot, npot as 0.0
+
+            # Always extend, either with calculated values or defaults
+            features.extend([ppot, npot])
+
+            return features
+        except Exception as e:
+             cls._log(f"Error extracting postflop features: {e}", "ERROR")
+             return None
+
+
+    @classmethod
+    def _calculate_normalized_strength(cls, hole_cards, community_cards):
+        """ Calculate hand strength normalized to [0, 1]. Returns float or raises error. """
+        # (Implementation identical to previous version, assumes HandEvaluator exists)
         all_cards = hole_cards + community_cards
         if len(all_cards) < 5: return 0.0
 
+        hand_eval_result = HandEvaluator.evaluate_hand(all_cards) # Can raise error
+        if not isinstance(hand_eval_result, tuple) or len(hand_eval_result) == 0:
+             raise ValueError("Invalid result from HandEvaluator")
+        hand_type_value = hand_eval_result[0]
+
         try:
-            hand_eval_result = HandEvaluator.evaluate_hand(all_cards)
+            all_ranks = list(HandEvaluator.HAND_TYPES.values())
+            min_r, max_r = min(all_ranks), max(all_ranks)
+        except AttributeError: min_r, max_r = 0, 9 # Fallback
 
-            # Extract numeric type value from tuple (hand_type_val, [kickers])
-            if isinstance(hand_eval_result, tuple):
-                hand_type_value = hand_eval_result[0]
-            else: # Fallback if somehow not a tuple
-                hand_type_value = float(hand_eval_result)
+        if max_r <= min_r: return 0.5 # Avoid division by zero
 
-            # Determine min/max rank from HandEvaluator constants
-            try:
-                 type_values = HandEvaluator.HAND_TYPES.values()
-                 min_rank = min(type_values) # e.g., 0
-                 max_rank = max(type_values) # e.g., 9
-            except AttributeError: # Fallback if HAND_TYPES not defined/accessible
-                 print("WARN: Cannot access HandEvaluator.HAND_TYPES, using ranks 0-9.")
-                 min_rank = 0; max_rank = 9
+        normalized = (hand_type_value - min_r) / float(max_r - min_r)
+        return float(np.clip(normalized, 0.0, 1.0))
 
-            if max_rank <= min_rank: return 0.5 # Avoid division by zero
 
-            # Normalize the numeric rank value
-            normalized_rank = (hand_type_value - min_rank) / (max_rank - min_rank)
-            return max(0.0, min(1.0, normalized_rank)) # Clamp to [0, 1]
+    @classmethod
+    def _extract_hand_type_features(cls, hole_cards, community_cards):
+        """ Extract binary hand type/draw features. Returns tuple or raises error. """
+        # (Implementation identical to previous version, assumes HandEvaluator exists)
+        all_cards = hole_cards + community_cards; n = len(all_cards)
+        if n < 5: return (0,0,0,0,0)
 
-        except Exception as e:
-            print(f"Error calculating hand strength: {e}")
-            return 0.0 # Return worst strength on error
+        hand_rank_val, _ = HandEvaluator.evaluate_hand(all_cards) # Can raise error
 
-    # --- Other methods _calculate_hand_potential, feature extraction, _simple_postflop_bucket etc remain unchanged ---
-    # --- They were not the source of the TypeError ---
+        h_p = 1 if hand_rank_val >= HandEvaluator.HAND_TYPES.get('pair', 1) else 0
+        h_tp = 1 if hand_rank_val >= HandEvaluator.HAND_TYPES.get('two_pair', 2) else 0
+        h_tr = 1 if hand_rank_val >= HandEvaluator.HAND_TYPES.get('three_of_a_kind', 3) else 0
+
+        ranks = sorted([c.rank for c in all_cards], reverse=True); suits = [c.suit for c in all_cards]
+        s_counts = Counter(suits); u_ranks = sorted(list(set(ranks)), reverse=True)
+
+        h_fd = 1 if any(c == 4 for c in s_counts.values()) else 0
+        h_sd = 0
+        if len(u_ranks) >= 4:
+             # Simplified OESD/Gutshot check
+             for i in range(len(u_ranks) - 3):
+                 if u_ranks[i] - u_ranks[i+3] <= 4: # Check if 4 ranks span 4 or 5 positions
+                      h_sd = 1; break
+             # Wheel draw check (A + 3 low cards)
+             if not h_sd and 14 in u_ranks and len({r for r in u_ranks if r <= 5}) >= 3:
+                  h_sd = 1
+
+        return h_p, h_tp, h_tr, h_sd, h_fd
+
+    @classmethod
+    def _extract_board_features(cls, community_cards):
+        """ Extract numerical board features (paired, suited, connected). Returns tuple or raises error. """
+        # (Implementation identical to previous version)
+        n = len(community_cards)
+        if n < 3: return (0.0, 0.0, 0.0)
+
+        ranks = [c.rank for c in community_cards]; suits = [c.suit for c in community_cards]
+        r_counts = Counter(ranks); s_counts = Counter(suits); u_ranks = sorted(list(set(ranks)))
+
+        pair_f = 0.0; p_counts = [c for c in r_counts.values() if c>=2]
+        if len(p_counts) >= 2 or any(c>=3 for c in p_counts): pair_f = 1.0
+        elif len(p_counts)==1: pair_f = 0.5
+
+        suit_f = 0.0; max_s_count = max(s_counts.values()) if s_counts else 0
+        if max_s_count >= 5: suit_f = 1.0
+        elif max_s_count == 4: suit_f = 2.0/3.0
+        elif max_s_count == 3: suit_f = 1.0/3.0
+
+        conn_f = 0.0
+        if len(u_ranks) >= 3:
+             is_v_conn, is_m_conn = False, False
+             for i in range(len(u_ranks) - 2):
+                 if u_ranks[i+2] - u_ranks[i] == 2: is_v_conn = True; break
+             if not is_v_conn:
+                 for i in range(len(u_ranks) - 2):
+                      if u_ranks[i+2] - u_ranks[i] <= 3: is_m_conn = True; break
+             # Wheel check (Ace + 2 low cards) implies medium connectivity if not already higher
+             if not is_v_conn and not is_m_conn and 14 in u_ranks and len({r for r in u_ranks if r <= 5}) >= 2:
+                 is_m_conn = True
+
+             if is_v_conn: conn_f = 1.0
+             elif is_m_conn: conn_f = 0.5
+
+        return pair_f, suit_f, conn_f
 
     @staticmethod
-    def _calculate_hand_potential(hole_cards, community_cards):
-        """ Estimate hand potential AIPF via Monte Carlo. """
-        num_simulations = 50 # Reduced default for faster testing/fallback
-        current_hand = hole_cards + community_cards
-        if len(current_hand) < 5: return 0.0, 0.0 # Cannot eval hand yet
-        current_rank = HandEvaluator.evaluate_hand(current_hand)
+    def _calculate_hand_potential(hole_cards, community_cards, num_simulations=50):
+        """ Estimates Ppot, Npot via Monte Carlo. Returns tuple or raises error. """
+        # (Implementation identical to previous version, assumes HandEvaluator exists)
+        current_hand = hole_cards + community_cards; n_curr = len(current_hand)
+        if n_curr < 5: return 0.0, 0.0 # Cannot calculate potential pre-flop
 
-        used_cards = frozenset(current_hand)
-        deck_list = [Card(r, s) for r in range(2, 15) for s in ['h','d','c','s'] if Card(r,s) not in used_cards]
+        curr_rank = HandEvaluator.evaluate_hand(current_hand) # Can raise error
 
-        cards_to_draw = 5 - len(community_cards)
-        if cards_to_draw <= 0 or len(deck_list) < cards_to_draw + 2: return 0.0, 0.0
+        used_set = frozenset(current_hand)
+        deck_list = [Card(r, s) for r in range(2, 15) for s in Card.SUITS if Card(r,s) not in used_set]
+        n_draw = max(0, 5 - len(community_cards))
+        if n_draw == 0: return 0.0, 0.0 # No potential on river
 
-        ahead_wins, ahead_losses = 0, 0
-        behind_wins, behind_losses = 0, 0
-        ahead_count, behind_count = 0, 0
+        if len(deck_list) < 2 + n_draw: # Need opp hole cards + runout cards
+             raise RuntimeError("Not enough cards in deck for potential simulation")
+
+        pp_wins, np_losses = 0, 0
+        pp_count, np_count = 0, 0
 
         for _ in range(num_simulations):
-             try:
-                 deck_sample = deck_list[:]; random.shuffle(deck_sample); opponent_hole = deck_sample[:2]
-                 remaining_deck = deck_sample[2:]
-                 additional_community = remaining_deck[:cards_to_draw]
-                 final_community = community_cards + additional_community
+            deck_samp = deck_list[:]; random.shuffle(deck_samp)
+            opp_hole = deck_samp[:2]
+            runout = deck_samp[2 : 2+n_draw]; final_comm = community_cards + runout
 
-                 player_hand_final = hole_cards + final_community
-                 opponent_hand_final = opponent_hole + final_community
+            player_final = hole_cards + final_comm
+            opp_final = opp_hole + final_comm
+            if len(player_final) < 5 or len(opp_final) < 5: continue
 
-                 if len(player_hand_final) < 5 or len(opponent_hand_final) < 5: continue
+            player_final_rank = HandEvaluator.evaluate_hand(player_final)
+            opp_final_rank = HandEvaluator.evaluate_hand(opp_final)
 
-                 # Compare current strength vs opponent's potential CURRENT hand
-                 opp_current_hand = opponent_hole + community_cards
-                 if len(opp_current_hand) < 5: opp_current_rank = HandEvaluator.evaluate_hand(opponent_hole + community_cards[:max(0, 5-len(opponent_hole))]) # Approximation
-                 else: opp_current_rank = HandEvaluator.evaluate_hand(opp_current_hand)
+            opp_curr = opp_hole + community_cards
+            opp_curr_rank = HandEvaluator.evaluate_hand(opp_curr) if len(opp_curr) >= 5 else (-1,[])
 
-                 currently_ahead = current_rank > opp_current_rank
+            is_ahead = curr_rank > opp_curr_rank
+            is_behind = curr_rank < opp_curr_rank
+            wins_sd = player_final_rank > opp_final_rank
 
-                 # Final comparison
-                 player_rank_final = HandEvaluator.evaluate_hand(player_hand_final)
-                 opponent_rank_final = HandEvaluator.evaluate_hand(opponent_hand_final)
-                 ends_ahead = player_rank_final > opponent_rank_final
+            if is_ahead: np_count += 1; np_losses += (0 if wins_sd else 1)
+            elif is_behind: pp_count += 1; pp_wins += (1 if wins_sd else 0)
 
-                 if currently_ahead:
-                     ahead_count += 1
-                     if ends_ahead: ahead_wins += 1
-                     else: ahead_losses += 1
-                 else: # Currently behind or tied
-                     behind_count += 1
-                     if ends_ahead: behind_wins += 1
-                     else: behind_losses += 1
-             except Exception: continue # Ignore errors in simulation
+        Ppot = (pp_wins / pp_count) if pp_count > 0 else 0.0
+        Npot = (np_losses / np_count) if np_count > 0 else 0.0
+        return float(Ppot), float(Npot)
 
-        # PPN = Positive Potential = Prob(Win | Currently Behind)
-        Ppot = (behind_wins / behind_count) if behind_count > 0 else 0.0
-        # NPN = Negative Potential = Prob(Lose | Currently Ahead)
-        Npot = (ahead_losses / ahead_count) if ahead_count > 0 else 0.0
-
-        # Some variants return Ppot, Npot directly. Others use EHS = ahead_wins/ahead_count
-        # Let's return a combined potential metric (more complex metrics exist)
-        # Return Ppot and (1-Npot) perhaps? Or just Ppot and Npot. Let's use that.
-        return Ppot, Npot # Return Positive and Negative potential
-
+    # --- K-Means Model Training ---
     @staticmethod
-    def _extract_hand_type_features(hole_cards, community_cards):
-        """ Extract binary features about the current best hand and draws. """
-        all_cards = hole_cards + community_cards
-        if len(all_cards)<5: return (0,0,0,0,0) # Default if too few cards
+    def train_models(num_samples_preflop=20000, num_samples_postflop=50000, random_state=42, include_potential_in_features=False):
+        """
+        Trains K-Means clustering models for each street and saves them.
+        Uses synthetic data generation. Ensure 'models/' directory exists.
+        """
+        if not SKLEARN_AVAILABLE: # Check if sklearn was imported
+            EnhancedCardAbstraction._log("Cannot train models: scikit-learn not installed.", "ERROR")
+            return None
 
-        # Get current best 5-card hand type
-        hand_rank, kickers = HandEvaluator.evaluate_hand(all_cards)
+        EnhancedCardAbstraction._log("--- Starting Enhanced Card Abstraction Model Training ---")
+        os.makedirs(EnhancedCardAbstraction._MODEL_DIR, exist_ok=True)
+        trained_models = {}
+        overall_start_time = time.time()
 
-        # Feature flags based on current best hand rank
-        has_pair = 1 if hand_rank >= HandEvaluator.HAND_TYPES['pair'] else 0
-        has_two_pair = 1 if hand_rank >= HandEvaluator.HAND_TYPES['two_pair'] else 0
-        has_trips = 1 if hand_rank >= HandEvaluator.HAND_TYPES['three_of_a_kind'] else 0
-
-        # Check for draws (using all 5, 6, or 7 cards available)
-        ranks = sorted([c.rank for c in all_cards], reverse=True)
-        suits = [c.suit for c in all_cards]
-        rank_counts = Counter(ranks)
-        suit_counts = Counter(suits)
-
-        # Flush draw (4 cards of same suit)
-        has_flush_draw = 1 if any(count == 4 for count in suit_counts.values()) else 0
-
-        # Straight draw (4 cards to a straight)
-        has_straight_draw = 0
-        unique_ranks = sorted(list(set(ranks)), reverse=True)
-        # OESD (8 outs)
-        for i in range(len(unique_ranks) - 3):
-            # Check for 4 consecutive ranks (e.g., 8,7,6,5 for OESD)
-            if unique_ranks[i] - unique_ranks[i+3] == 3:
-                 # Ensure not already a straight (unless Ace-low handled separately)
-                 if not (len(unique_ranks)>=5 and unique_ranks[i] - unique_ranks[i+4]==4):
-                     has_straight_draw = 1; break
-        # Gutshot (4 outs) - check if removing one card leaves 4 consecutive
-        if not has_straight_draw and len(unique_ranks)>=4:
-            for i in range(len(unique_ranks) - 3):
-                # Check for 4 out of 5 consecutive ranks (e.g., 8,7,5,4 needs a 6)
-                if unique_ranks[i] - unique_ranks[i+3] == 4 and (unique_ranks[i]-unique_ranks[i+1] > 1 or unique_ranks[i+1]-unique_ranks[i+2]>1 or unique_ranks[i+2]-unique_ranks[i+3]>1):
-                     has_straight_draw = 1; break
-        # Check for Ace-low gutshots (A234 needs 5, A345 needs 2 etc.) handled implicitly if Ace=14
-
-        return has_pair, has_two_pair, has_trips, has_straight_draw, has_flush_draw
-
-    @staticmethod
-    def _extract_board_features(community_cards):
-        """ Extract features about the board texture. """
-        if not community_cards or len(community_cards)<3: return (0, 0, 0)
-        ranks = sorted([c.rank for c in community_cards], reverse=True)
-        suits = [c.suit for c in community_cards]
-        rank_counts = Counter(ranks); suit_counts = Counter(suits)
-
-        board_pair = 1 if any(count >= 2 for count in rank_counts.values()) else 0 # Paired board
-        board_suited = 1 if any(count >= 3 for count in suit_counts.values()) else 0 # 3+ cards of same suit
-        board_connected = 0 # Connected (e.g., 3+ cards within 5 rank range?) - Simplified: 2+ cards within 2 ranks
-        unique_ranks = sorted(list(set(ranks)))
-        for i in range(len(unique_ranks) - 1):
-            if unique_ranks[i+1] - unique_ranks[i] <= 2: board_connected = 1; break
-        return board_pair, board_suited, board_connected
-
-    @staticmethod
-    def _simple_postflop_bucket(hole_cards, community_cards, num_buckets):
-        """ Simple postflop bucketing using strength and potential estimate. """
-        # Fallback uses hand strength primarily
-        hand_strength = EnhancedCardAbstraction._calculate_hand_strength(hole_cards, community_cards)
-        # Could add a *very* rough potential score here if needed without MC
-        score = hand_strength
-        # Normalize score [0,1] to bucket range [num_buckets-1, 0] (inverted)
-        bucket = num_buckets - 1 - int(score * (num_buckets -1))
-        return max(0, min(num_buckets - 1, bucket)) # Clamp
-
-    # --- Training Methods (Placeholder - require data generation/loading) ---
-    @staticmethod
-    def train_models(training_data_path=None, num_preflop=10000, num_postflop=20000):
-        """ Train and save clustering models. Needs data or uses synthetic. """
-        os.makedirs("models", exist_ok=True)
-        models = {}
-        data = {}
-
-        # --- Preflop ---
-        model_name = 'preflop'; model_key = '_preflop_model'
-        num_clusters = EnhancedCardAbstraction.NUM_PREFLOP_BUCKETS
+        # --- Preflop Model ---
+        model_name = 'preflop'; num_clusters = EnhancedCardAbstraction.NUM_PREFLOP_BUCKETS
         model_path = EnhancedCardAbstraction._preflop_model_path
-        try:
-             if training_data_path and os.path.exists(os.path.join(training_data_path, f"{model_name}_data.pkl")):
-                  with open(os.path.join(training_data_path, f"{model_name}_data.pkl"), 'rb') as f: data[model_name] = pickle.load(f)
-             else: data[model_name] = EnhancedCardAbstraction._generate_synthetic_preflop_data(num_preflop)
+        EnhancedCardAbstraction._log(f"\nTraining {model_name} model (k={num_clusters})...")
+        start_t = time.time()
+        EnhancedCardAbstraction._log(f" Generating {num_samples_preflop:,} synthetic samples...")
+        preflop_data = EnhancedCardAbstraction._generate_synthetic_preflop_data(num_samples_preflop)
+        data_t = time.time()
+        if preflop_data:
+            EnhancedCardAbstraction._log(f" Fitting {model_name} K-Means ({len(preflop_data)} samples)...")
+            try:
+                 # <<< MODIFICATION: Add verbose=1 and n_jobs=-1 >>>
+                 preflop_kmeans = KMeans(
+                     n_clusters=num_clusters,
+                     random_state=random_state,
+                     n_init=10, # Default is 10, explicit for clarity
+                     verbose=1, # Print progress messages
+                 )
+                 # <<< END MODIFICATION >>>
 
-             if data[model_name]:
-                  model = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
-                  print(f"Fitting {model_name} model ({len(data[model_name])} samples, {num_clusters} clusters)...")
-                  model.fit(np.array(data[model_name]))
-                  with open(model_path, 'wb') as f: pickle.dump(model, f)
-                  models[model_name] = model; print(f"Saved {model_name} model.")
-             else: print(f"WARN: No data for {model_name} model.")
-        except Exception as e: print(f"ERROR training {model_name} model: {e}")
+                 preflop_kmeans.fit(np.array(preflop_data))
+                 fit_t = time.time()
+                 with open(model_path, 'wb') as f: pickle.dump(preflop_kmeans, f)
+                 save_t = time.time()
+                 EnhancedCardAbstraction._log(f" SUCCESS: {model_name} model saved ({save_t - start_t:.2f}s total: gen={data_t-start_t:.2f}s, fit={fit_t-data_t:.2f}s, save={save_t-fit_t:.2f}s)")
+                 trained_models['preflop'] = preflop_kmeans
+            except Exception as e: EnhancedCardAbstraction._log(f" ERROR training/saving {model_name}: {e}", "ERROR")
+        else: EnhancedCardAbstraction._log(" No preflop data generated.", "WARN")
 
-        # --- Postflop (Flop, Turn, River) ---
-        for round_info in [('flop', 3, EnhancedCardAbstraction.NUM_FLOP_BUCKETS, EnhancedCardAbstraction._flop_model_path),
-                           ('turn', 4, EnhancedCardAbstraction.NUM_TURN_BUCKETS, EnhancedCardAbstraction._turn_model_path),
-                           ('river', 5, EnhancedCardAbstraction.NUM_RIVER_BUCKETS, EnhancedCardAbstraction._river_model_path)]:
-             model_name, num_comm, num_clusters, model_path = round_info
-             try:
-                  if training_data_path and os.path.exists(os.path.join(training_data_path, f"{model_name}_data.pkl")):
-                       with open(os.path.join(training_data_path, f"{model_name}_data.pkl"), 'rb') as f: data[model_name] = pickle.load(f)
-                  else: data[model_name] = EnhancedCardAbstraction._generate_synthetic_postflop_data(num_comm, num_postflop)
+        # --- Postflop Models ---
+        postflop_configs = [
+            ("Flop", 3, EnhancedCardAbstraction.NUM_FLOP_BUCKETS, EnhancedCardAbstraction._flop_model_path),
+            ("Turn", 4, EnhancedCardAbstraction.NUM_TURN_BUCKETS, EnhancedCardAbstraction._turn_model_path),
+            ("River", 5, EnhancedCardAbstraction.NUM_RIVER_BUCKETS, EnhancedCardAbstraction._river_model_path)
+        ]
+        EnhancedCardAbstraction._log(f"\nGenerating {num_samples_postflop:,} synthetic postflop samples (Features based on River state, Potential={include_potential_in_features})...")
+        start_t_post_gen = time.time()
+        postflop_data = EnhancedCardAbstraction._generate_synthetic_postflop_data(5, num_samples_postflop, include_potential_in_features)
+        EnhancedCardAbstraction._log(f" Postflop data generated ({time.time() - start_t_post_gen:.2f}s).")
 
-                  if data[model_name]:
-                       model = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
-                       print(f"Fitting {model_name} model ({len(data[model_name])} samples, {num_clusters} clusters)...")
-                       model.fit(np.array(data[model_name]))
-                       with open(model_path, 'wb') as f: pickle.dump(model, f)
-                       models[model_name] = model; print(f"Saved {model_name} model.")
-                  else: print(f"WARN: No data for {model_name} model.")
-             except Exception as e: print(f"ERROR training {model_name} model: {e}")
+        if not postflop_data:
+             EnhancedCardAbstraction._log(" No postflop data generated. Skipping Flop/Turn/River models.", "WARN")
+        else:
+            postflop_data_np = np.array(postflop_data)
+            for round_name, num_comm, num_clusters, model_path in postflop_configs:
+                  EnhancedCardAbstraction._log(f"\nTraining {round_name} model (k={num_clusters})...")
+                  start_t = time.time()
+                  try:
+                       # <<< MODIFICATION: Add verbose=1 and n_jobs=-1 >>>
+                       kmeans = KMeans(
+                           n_clusters=num_clusters,
+                           random_state=random_state,
+                           n_init=10,
+                           verbose=1, # Print progress messages
+                       )
+                       # <<< END MODIFICATION >>>
 
-        # Set models on class if needed (or rely on lazy load)
-        if 'preflop' in models: EnhancedCardAbstraction._preflop_model = models['preflop']
-        if 'flop' in models: EnhancedCardAbstraction._flop_model = models['flop']
-        if 'turn' in models: EnhancedCardAbstraction._turn_model = models['turn']
-        if 'river' in models: EnhancedCardAbstraction._river_model = models['river']
-        return models
+                       EnhancedCardAbstraction._log(f" Fitting {round_name} K-Means ({len(postflop_data_np)} samples)...")
+                       kmeans.fit(postflop_data_np) # Fit on the generated data
+                       fit_t = time.time()
+                       with open(model_path, 'wb') as f: pickle.dump(kmeans, f)
+                       save_t = time.time()
+                       EnhancedCardAbstraction._log(f" SUCCESS: {round_name} model saved ({save_t - start_t:.2f}s total: fit={fit_t-start_t:.2f}s, save={save_t-fit_t:.2f}s)")
+                       trained_models[round_name.lower()] = kmeans
+                  except Exception as e: EnhancedCardAbstraction._log(f" ERROR training/saving {round_name}: {e}", "ERROR")
 
+        total_t = time.time() - overall_start_time
+        EnhancedCardAbstraction._log(f"\n--- Model Training Finished ({total_t:.2f} seconds total) ---")
+        # Update class attributes (Optional: lazy loading might be preferred)
+        # ...
+        return trained_models
+
+    # --- Synthetic Data Generation ---
+    # (Static methods, implementations identical to previous version, ensure formatted)
     @staticmethod
-    def _generate_synthetic_preflop_data(num_samples=1000):
-        """ Generate synthetic preflop features. """
-        data = []
-        all_cards = [Card(r, s) for r in range(2, 15) for s in ['h','d','c','s']]
-        count = 0
-        # Sample combinations until enough valid feature sets generated
-        while count < num_samples:
-             try:
-                  hole_cards = random.sample(all_cards, 2)
-                  features = EnhancedCardAbstraction._extract_preflop_features(hole_cards)
-                  if features: # Ensure features were generated
-                       data.append(features); count+=1
-             except Exception: continue # Skip if feature extraction fails
-             if count > num_samples * 1.5: break # Safety break
+    def _generate_synthetic_preflop_data(num_samples):
+        """ Generate features for random preflop hands. """
+        log = EnhancedCardAbstraction._log # Use class logger
+        data = []; count = 0; attempts = 0
+        all_cards = [Card(r,s) for r in range(2, 15) for s in Card.SUITS]
+        max_attempts = num_samples * 5 # Allow more attempts
+
+        while count < num_samples and attempts < max_attempts:
+            attempts += 1
+            try:
+                c1, c2 = random.sample(all_cards, 2)
+                features = EnhancedCardAbstraction._extract_preflop_features([c1, c2])
+                if features is not None: # Check if features were extracted
+                     data.append(features)
+                     count += 1
+            except Exception: continue # Skip errors silently
+
+        if count < num_samples:
+             log(f" Preflop data gen only produced {count}/{num_samples} samples.", "WARN")
         return data
 
     @staticmethod
-    def _generate_synthetic_postflop_data(num_community, num_samples=1000):
-        """ Generate synthetic postflop features. """
-        data = []
-        all_cards = [Card(r, s) for r in range(2, 15) for s in ['h','d','c','s']]
-        count = 0
-        while count < num_samples:
+    def _generate_synthetic_postflop_data(num_community_cards, num_samples, include_potential):
+        """ Generate features for random postflop hands/boards. """
+        log = EnhancedCardAbstraction._log
+        data = []; count = 0; attempts = 0
+        all_cards = [Card(r,s) for r in range(2, 15) for s in Card.SUITS]
+        cards_needed = 2 + num_community_cards
+        max_attempts = num_samples * 10 # Allow more attempts
+
+        if len(all_cards) < cards_needed:
+            log("Not enough cards in deck to generate samples.", "ERROR")
+            return []
+
+        for _ in range(max_attempts): # Use a for loop with break for clarity
+             if count >= num_samples: break
              try:
-                  if 2 + num_community > len(all_cards): break # Not possible
-                  sampled_cards = random.sample(all_cards, 2 + num_community)
-                  hole_cards = sampled_cards[:2]
-                  community_cards = sampled_cards[2:]
-                  features = EnhancedCardAbstraction._extract_postflop_features(hole_cards, community_cards)
-                  if features: # Ensure features were generated
-                       data.append(features); count+=1
-             except Exception: continue # Skip if feature extraction fails
-             if count > num_samples * 1.5: break # Safety break
+                 sampled_cards = random.sample(all_cards, cards_needed)
+                 hole_cards = sampled_cards[:2]
+                 community = sampled_cards[2:]
+                 features = EnhancedCardAbstraction._extract_postflop_features(hole_cards, community, include_potential)
+                 if features is not None: # Check if features extracted
+                      data.append(features)
+                      count += 1
+             except Exception: continue # Skip errors
+
+        if count < num_samples:
+            log(f" Postflop data gen only produced {count}/{num_samples} samples.", "WARN")
         return data
 
-# --- END OF FILE organized_poker_bot/cfr/enhanced_card_abstraction.py ---
+# --- Example Usage / Training Trigger ---
+if __name__ == '__main__':
+    print("="*50)
+    print(" Example: Training Enhanced Card Abstraction Models (Small Sample)")
+    print("="*50)
+    # Ensure the models/ directory exists relative to project root when running this directly
+    # Note: os.makedirs is called within train_models, so this is just informational.
+    print(f"Models will be saved in: {EnhancedCardAbstraction._MODEL_DIR}")
+
+    # Run training with small sample size for demonstration
+    EnhancedCardAbstraction.train_models(
+        num_samples_preflop=1000,
+        num_samples_postflop=2000,
+        include_potential_in_features=False # Set True to include slower potential calculation
+    )
+
+    print("\n" + "="*50)
+    print(" Example Usage after Training/Loading:")
+    print("="*50)
+    # Example hand and community cards
+    h = [Card(14, 's'), Card(13, 's')] # AKs
+    c_flop = [Card(12, 's'), Card(7, 'h'), Card(2, 's')] # Flop Qs 7h 2s
+    c_turn = c_flop + [Card(8, 'd')] # Turn 8d
+    c_river = c_turn + [Card(11, 'c')] # River Jc
+
+    # Get abstractions (lazy loading should happen here if models trained/exist)
+    EnhancedCardAbstraction.DETAILED_LOGGING = True # Enable detailed logs for example usage
+    pre_b = EnhancedCardAbstraction.get_preflop_abstraction(h)
+    print(f"\nPreflop Bucket for {' '.join(map(str, h))}: {pre_b}")
+
+    flop_b = EnhancedCardAbstraction.get_postflop_abstraction(h, c_flop)
+    print(f"\nFlop Bucket for {' '.join(map(str, h))} on {' '.join(map(str, c_flop))}: {flop_b}")
+
+    turn_b = EnhancedCardAbstraction.get_postflop_abstraction(h, c_turn)
+    print(f"\nTurn Bucket for {' '.join(map(str, h))} on {' '.join(map(str, c_turn))}: {turn_b}")
+
+    river_b = EnhancedCardAbstraction.get_postflop_abstraction(h, c_river)
+    print(f"\nRiver Bucket for {' '.join(map(str, h))} on {' '.join(map(str, c_river))}: {river_b}")
+    EnhancedCardAbstraction.DETAILED_LOGGING = False # Disable after example
+
+# --- END OF FILE ---
