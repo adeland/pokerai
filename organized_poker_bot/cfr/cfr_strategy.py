@@ -1,229 +1,320 @@
+# --- START OF FILE organized_poker_bot/cfr/cfr_strategy.py ---
 """
 CFR strategy implementation for poker games.
 This module provides a class for using trained CFR strategies.
+(Refactored V3: Use shared info_set_util.py for key generation)
 """
 
 import random
 import os
 import sys
+import pickle # For loading/saving
+import numpy as np # Added for np.random.choice
+import traceback # Added for detailed error logging
 
-# Add the parent directory to the path to make imports work when run directly
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Use absolute imports that work when run directly
-from organized_poker_bot.cfr.card_abstraction import CardAbstraction
+# --- Absolute Imports ---
+try:
+    # Card Abstraction might not be needed directly anymore
+    # from organized_poker_bot.cfr.card_abstraction import CardAbstraction
+    # Import the NEW Utility for key generation
+    from organized_poker_bot.cfr.info_set_util import generate_info_set_key
+    # Keep GameState import if _default_strategy or others need it
+    from organized_poker_bot.game_engine.game_state import GameState
+except ImportError as e:
+    print(f"FATAL Import Error in cfr_strategy.py: {e}")
+    print("Ensure 'organized_poker_bot' is in PYTHONPATH or run from root.")
+    sys.exit(1)
+# --- End Absolute Imports ---
 
 class CFRStrategy:
     """
-    A class for using trained CFR strategies.
-    
-    This class provides methods for using a trained CFR strategy to make decisions
-    in a poker game.
-    
+    A class for loading and using trained CFR average strategies.
+
+    Reads a strategy dictionary mapping information set keys (strings) to
+    action probability dictionaries {action_tuple: probability}.
+
     Attributes:
-        strategy: Dictionary mapping information set keys to action probabilities
+        strategy (dict): The loaded strategy map.
     """
-    
+
     def __init__(self):
         """
-        Initialize the CFR strategy.
+        Initialize the CFR strategy holder.
         """
-        self.strategy = {}
-    
+        self.strategy = {} # Strategy map loaded from file
+
     def get_action(self, game_state, player_idx):
         """
-        Get the best action for the current game state.
-        
+        Get a stochastic action based on the loaded strategy for the current game state.
+
         Args:
-            game_state: The current game state
-            player_idx: The player index
-            
+            game_state (GameState): The current game state object.
+            player_idx (int): The index of the player deciding the action.
+
         Returns:
-            tuple or str: The chosen action (either a tuple of (action_type, amount) or a string)
+            tuple: The chosen action tuple (action_type, amount), or a default
+                   action (e.g., check/fold) if the state is not found or invalid.
         """
-        # Get the information set key for the current game state
-        info_set_key = self._create_info_set_key(game_state, player_idx)
-        
-        # If we don't have a strategy for this information set, use a default strategy
-        if info_set_key not in self.strategy:
-            return self._default_strategy(game_state)
-        
-        # Get the strategy for this information set
-        action_probs = self.strategy[info_set_key]
-        
-        # Choose an action based on the strategy
+        # --- Generate InfoSet Key using Utility Function ---
+        info_set_key = None # Initialize
+        try:
+            info_set_key = generate_info_set_key(game_state, player_idx)
+            if info_set_key is None: # Check if utility function failed
+                raise ValueError("InfoSet key generation returned None")
+        except Exception as key_err:
+            print(f"WARN CFRStrategy: Failed to generate info key P{player_idx}: {key_err}. Using default action.")
+            # Pass available actions to default strategy if possible
+            available_actions = None
+            try:
+                available_actions = game_state.get_available_actions()
+            except Exception:
+                 pass # Ignore failure to get actions here, default will handle it
+            return self._default_strategy(game_state, available_actions) # Fallback if key generation fails
+
+        # --- Strategy Lookup ---
+        # Use .get() for safer dictionary access
+        action_probs = self.strategy.get(info_set_key)
+
+        # If info set not found in strategy map, or invalid, use default
+        if action_probs is None or not isinstance(action_probs, dict) or not action_probs:
+            # InfoSet not found or invalid format - Use default strategy
+            # Logging this might be useful during debugging initial strategy runs
+            # print(f"DEBUG CFRStrategy: Key '{info_set_key}' not found or invalid. Defaulting.")
+            available_actions = None
+            try:
+                available_actions = game_state.get_available_actions()
+            except Exception:
+                 pass
+            return self._default_strategy(game_state, available_actions)
+
+        # --- Choose Action based on Loaded Probabilities ---
+        # Ensure the chosen action is valid within the current game context
         return self._choose_action(action_probs, game_state)
-    
-    def _create_info_set_key(self, game_state, player_idx):
-        """
-        Create a key for an information set.
-        
-        Args:
-            game_state: The current game state
-            player_idx: The player index
-            
-        Returns:
-            str: A string key for the information set
-        """
-        # Get the player's hole cards
-        hole_cards = game_state.hole_cards[player_idx] if hasattr(game_state, 'hole_cards') else []
-        
-        # Get the community cards
-        community_cards = game_state.community_cards if hasattr(game_state, 'community_cards') else []
-        
-        # Create a key based on the cards
-        if hole_cards:
-            if not community_cards:
-                # Preflop
-                hole_card_bucket = CardAbstraction.get_preflop_abstraction(hole_cards)
-                cards_key = f"preflop_bucket_{hole_card_bucket}"
-            else:
-                # Postflop
-                hole_card_bucket = CardAbstraction.get_postflop_abstraction(
-                    hole_cards, community_cards)
-                round_name = self._determine_round(community_cards)
-                cards_key = f"{round_name}_bucket_{hole_card_bucket}"
-        else:
-            cards_key = "no_cards"
-        
-        # Include position information
-        position = game_state.get_position(player_idx) if hasattr(game_state, 'get_position') else player_idx
-        position_key = f"pos_{position}"
-        
-        # Include round information
-        round_key = f"round_{game_state.betting_round}" if hasattr(game_state, 'betting_round') else ""
-        
-        # Include pot and stack information if available
-        pot_key = ""
-        stack_key = ""
-        if hasattr(game_state, 'pot'):
-            pot_key = f"pot_{game_state.pot // game_state.big_blind}"
-        if hasattr(game_state, 'player_stacks') and len(game_state.player_stacks) > player_idx:
-            stack_key = f"stack_{game_state.player_stacks[player_idx] // game_state.big_blind}"
-        
-        # Combine all components into a single key
-        components = [comp for comp in [cards_key, position_key, round_key, pot_key, stack_key] if comp]
-        return "|".join(components)
-    
-    def _determine_round(self, community_cards):
-        """
-        Determine the current betting round based on community cards.
-        
-        Args:
-            community_cards: List of community cards
-            
-        Returns:
-            str: The current round name
-        """
-        num_cards = len(community_cards)
-        if num_cards == 0:
-            return "preflop"
-        elif num_cards == 3:
-            return "flop"
-        elif num_cards == 4:
-            return "turn"
-        elif num_cards == 5:
-            return "river"
-        else:
-            return f"unknown_{num_cards}"
-    
+
+    # --- REMOVE _create_info_set_key method ---
+    # The logic is now handled by the imported generate_info_set_key utility
+
+    # --- REMOVE _determine_round method ---
+    # This logic is also embedded within generate_info_set_key
+
     def _choose_action(self, action_probs, game_state):
         """
-        Choose an action based on the strategy.
-        
+        Choose an action stochastically based on the strategy probabilities,
+        ensuring the chosen action is currently available.
+
         Args:
-            action_probs: Dictionary mapping actions to probabilities
-            game_state: The current game state
-            
+            action_probs (dict): Dictionary {action_tuple: probability} from strategy map.
+            game_state (GameState): The current game state (to check available actions).
+
         Returns:
-            tuple or str: The chosen action
+            tuple: The chosen, available action tuple.
         """
-        # Get available actions
-        available_actions = game_state.get_available_actions() if hasattr(game_state, 'get_available_actions') else []
-        
-        # Filter out actions that are not available
-        valid_actions = {}
-        for action, prob in action_probs.items():
-            if action in available_actions:
-                valid_actions[action] = prob
-        
-        # If there are no valid actions, use a default strategy
-        if not valid_actions:
-            return self._default_strategy(game_state)
-        
-        # Normalize probabilities
-        total_prob = sum(valid_actions.values())
-        if total_prob > 0:
-            for action in valid_actions:
-                valid_actions[action] /= total_prob
-        
-        # Choose an action based on the probabilities
-        actions = list(valid_actions.keys())
-        probs = list(valid_actions.values())
-        
-        # Choose an action
-        action = random.choices(actions, weights=probs, k=1)[0]
-        
-        # Parse the action if it's a string representation of a tuple
-        if isinstance(action, str) and action.startswith(("bet_", "raise_")):
-            action_type, amount = action.split("_", 1)
-            return (action_type, int(amount))
-        
-        return action
-    
-    def _default_strategy(self, game_state):
+        # Get currently available actions from the game state
+        available_actions = []
+        try:
+            available_actions = game_state.get_available_actions() # Assumes GameState returns list of tuples
+        except Exception as e:
+            print(f"WARN _choose_action: Failed to get available actions: {e}. Defaulting.")
+            return ('fold', 0) # Default safe action if we can't even get actions
+
+        if not available_actions: # Should ideally not happen if get_action is called correctly
+            # print("WARN _choose_action: No available actions found in game state.")
+            return ('fold', 0) # Default safe action
+
+        # Filter the strategy probabilities to include only available actions
+        valid_actions_dict = {}
+        total_prob_available = 0.0
+        for action_tuple, prob in action_probs.items():
+            # Important: Check if the *exact* action tuple exists in available_actions
+            # Handle potential type mismatches defensively (e.g., ensure action_tuple is hashable)
+            try:
+                if action_tuple in available_actions and isinstance(prob, (int, float)) and prob > 1e-9: # Use small threshold, check prob type
+                    valid_actions_dict[action_tuple] = prob
+                    total_prob_available += prob
+            except TypeError:
+                # Handle cases where action_tuple might not be hashable (e.g., if format is wrong)
+                # print(f"WARN _choose_action: Non-hashable action tuple encountered: {action_tuple}")
+                pass
+
+
+        # If no available actions match the strategy (or sum is zero), use default
+        if not valid_actions_dict or total_prob_available <= 1e-9: # Use threshold
+            # print(f"WARN _choose_action: No overlap between strategy and available actions, or zero probability sum. Strategy: {action_probs}, Available: {available_actions}. Defaulting.")
+            return self._default_strategy(game_state, available_actions) # Pass available for better default
+
+        # Normalize probabilities of available actions
+        normalized_probs = []
+        action_list = list(valid_actions_dict.keys())
+        # Ensure action_list is not empty before proceeding
+        if not action_list:
+             print(f"ERROR _choose_action: action_list became empty after filtering. Defaulting.")
+             return self._default_strategy(game_state, available_actions)
+
+        for action in action_list:
+            # Ensure probability is valid before appending
+            prob = valid_actions_dict.get(action, 0.0)
+            # Handle potential division by zero or invalid probs
+            if total_prob_available > 1e-9:
+                normalized_probs.append(prob / total_prob_available)
+            else:
+                 # Should not happen if checked earlier, but as a safeguard
+                 normalized_probs.append(0.0)
+
+        # Ensure probabilities sum close to 1 before passing to choice
+        prob_sum = sum(normalized_probs)
+        if abs(prob_sum - 1.0) > 1e-6:
+            # If sum is significantly off, re-normalize or default to uniform/deterministic
+            # print(f"WARN _choose_action: Normalized probs sum to {prob_sum}. Re-normalizing/Defaulting.")
+            # Option 1: Simple re-normalization (if sum > 0)
+            if prob_sum > 1e-9:
+                 normalized_probs = [p / prob_sum for p in normalized_probs]
+            # Option 2: Default to uniform probability among valid actions
+            else:
+                 num_valid = len(action_list)
+                 normalized_probs = [1.0 / num_valid] * num_valid
+                 if not normalized_probs: # If action_list was empty somehow
+                      print(f"ERROR _choose_action: No valid actions for uniform fallback. Defaulting.")
+                      return self._default_strategy(game_state, available_actions)
+
+
+        # Choose action stochastically based on normalized probabilities
+        try:
+            # Use numpy's choice for potentially better handling of floating point sums
+            chosen_action_index = np.random.choice(len(action_list), p=normalized_probs)
+            chosen_action = action_list[chosen_action_index]
+            # Final check: ensure the chosen action is still in available_actions (sanity check)
+            if chosen_action not in available_actions:
+                 print(f"ERROR _choose_action: Chosen action {chosen_action} not in available {available_actions}. Defaulting.")
+                 return self._default_strategy(game_state, available_actions)
+            return chosen_action
+        except ValueError as ve: # Catch specific error if probs don't sum to 1 or contain negatives
+            print(f"ERROR _choose_action: ValueError during np.random.choice: {ve}. Probs={normalized_probs}. Defaulting.")
+            return self._default_strategy(game_state, available_actions)
+        except Exception as e: # Catch other potential errors
+            print(f"ERROR _choose_action: Failed random choice: {e}. Probs={normalized_probs}. Defaulting.")
+            traceback.print_exc()
+            return self._default_strategy(game_state, available_actions)
+
+    def _default_strategy(self, game_state, available_actions=None):
         """
-        Use a default strategy when we don't have a trained strategy.
-        
+        Fallback strategy when an info set is not found or no valid action exists.
+        Prioritizes check/call over folding.
+
         Args:
-            game_state: The current game state
-            
+            game_state (GameState): The current game state (might be used if actions not passed).
+            available_actions (list, optional): Pre-fetched list of available actions.
+
         Returns:
-            tuple or str: The chosen action
+            tuple: The chosen default action.
         """
-        # Get available actions
-        available_actions = game_state.get_available_actions() if hasattr(game_state, 'get_available_actions') else []
-        
-        # If there are no available actions, fold
-        if not available_actions:
-            return "fold"
-        
-        # Prefer checking or calling over folding
-        if "check" in available_actions:
-            return "check"
-        elif "call" in available_actions:
-            return "call"
-        
-        # If we can't check or call, choose a random action
-        return random.choice(available_actions)
-    
+        if available_actions is None:
+            # Get actions if not provided (slightly less efficient)
+            try:
+                available_actions = game_state.get_available_actions()
+            except Exception as e:
+                 print(f"WARN _default_strategy: Failed to get available actions: {e}. Defaulting to fold.")
+                 available_actions = [] # Ensure it's an empty list
+
+        if not available_actions or not isinstance(available_actions, list): # No actions possible or invalid type
+            return ('fold', 0) # Or perhaps None if the game state is inconsistent
+
+        # Ensure actions are in the expected tuple format if possible
+        valid_formatted_actions = []
+        for act in available_actions:
+             if isinstance(act, tuple) and len(act) == 2:
+                  valid_formatted_actions.append(act)
+        available_actions = valid_formatted_actions # Use only validly formatted actions
+
+        if not available_actions: # If filtering removed all actions
+             return ('fold', 0)
+
+        # Check if check is available
+        check_action = ('check', 0)
+        if check_action in available_actions:
+            return check_action
+
+        # Check if call is available (find any call action, regardless of amount)
+        # Ensure action comparison is robust
+        call_actions = [a for a in available_actions if isinstance(a[0], str) and a[0].lower() == 'call']
+        if call_actions:
+            # Prefer the call action with the correct amount if possible,
+            # otherwise just take the first one found. GameState should provide the correct one.
+            return call_actions[0] # Return the first available call action
+
+        # If check/call not available, default to folding (safest)
+        fold_action = ('fold', 0)
+        if fold_action in available_actions:
+             return fold_action
+
+        # If somehow fold is also unavailable, return the first action in the list
+        # This should only happen in very strange edge cases or forced actions
+        # print(f"WARN _default_strategy: No check/call/fold found. Returning first available action: {available_actions[0]}")
+        return available_actions[0]
+
     def save(self, filename):
         """
-        Save the strategy to a file.
-        
+        Save the strategy dictionary to a file using pickle.
+
         Args:
-            filename: Path to save the strategy
+            filename (str): Path to the save file.
         """
-        import pickle
-        with open(filename, 'wb') as f:
-            pickle.dump(self.strategy, f)
-    
+        try:
+            # Ensure directory exists
+            dir_name = os.path.dirname(filename)
+            if dir_name: # Only create if path includes a directory
+                os.makedirs(dir_name, exist_ok=True)
+            # Save using highest protocol
+            with open(filename, 'wb') as f:
+                pickle.dump(self.strategy, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Strategy saved successfully to {filename}")
+        except (OSError, pickle.PicklingError) as e: # Catch specific file/pickle errors
+            print(f"ERROR saving strategy to {filename}: {e}")
+        except Exception as e: # Catch unexpected errors
+             print(f"ERROR saving strategy to {filename}: Unexpected error - {e}")
+             traceback.print_exc()
+
+
     def load(self, filename):
         """
-        Load a strategy from a file.
-        
+        Load a strategy dictionary from a pickle file.
+
         Args:
-            filename: Path to load the strategy from
-        """
-        import pickle
-        with open(filename, 'rb') as f:
-            self.strategy = pickle.load(f)
-    
-    def __str__(self):
-        """
-        Get a string representation of the strategy.
-        
+            filename (str): Path to the strategy file.
+
         Returns:
-            str: A string representation
+             bool: True if loading was successful, False otherwise.
         """
-        return f"CFRStrategy({len(self.strategy)} info sets)"
+        if not os.path.exists(filename):
+            print(f"ERROR loading strategy: File not found at {filename}")
+            self.strategy = {} # Ensure strategy is empty if load fails
+            return False
+
+        try:
+            with open(filename, 'rb') as f:
+                loaded_strategy = pickle.load(f)
+            # Basic validation: Ensure it's a dictionary
+            if isinstance(loaded_strategy, dict):
+                self.strategy = loaded_strategy
+                print(f"Strategy loaded successfully from {filename} ({len(self.strategy):,} info sets)")
+                return True
+            else:
+                print(f"ERROR loading strategy: Loaded object is not a dict (Type: {type(loaded_strategy)})")
+                self.strategy = {}
+                return False
+        except (pickle.UnpicklingError, EOFError, TypeError, AttributeError) as e: # Catch common pickle errors
+            print(f"ERROR loading strategy from {filename}: Invalid pickle format or data - {e}")
+            self.strategy = {}
+            return False
+        except Exception as e: # Catch other unexpected errors
+            print(f"ERROR loading strategy from {filename}: Unexpected error - {e}")
+            traceback.print_exc()
+            self.strategy = {}
+            return False
+
+    def __str__(self):
+        """ String representation showing number of info sets loaded. """
+        # Ensure self.strategy is a dict before calling len
+        count = len(self.strategy) if isinstance(self.strategy, dict) else 0
+        return f"CFRStrategy({count:,} info sets loaded)"
+
+# --- END OF FILE organized_poker_bot/cfr/cfr_strategy.py ---
