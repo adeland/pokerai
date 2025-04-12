@@ -31,7 +31,7 @@ except ImportError as e:
 
 # --- Worker Function ---
 def worker_train_batch(args):
-    """ Worker function to run CFR iterations. """
+    """ Worker function to run CFR iterations. (V9 Corrected: Add start_new_hand) """
     # Unpack arguments (ensure order matches worker_args in OptimizedSelfPlayTrainer.train)
     game_state_factory_instance, num_players, batch_size, current_iteration_t, \
         _, _, worker_id = args # Unpack proxies even if not used directly
@@ -53,14 +53,12 @@ def worker_train_batch(args):
         game_state = None
         initial_stacks_hand = []
 
-        # --- Setup Hand using factory instance ---
+        # --- Setup Hand using factory instance AND START HAND ---
         try:
-            # --- Corrected: Call factory with num_players ---
-            # Assumes factory is callable and takes num_players
+            # --- Create GameState Object ---
             game_state = game_state_factory_instance(num_players)
-            # --- End Correction ---
 
-            # Retrieve initial stacks *after* state creation
+            # --- Retrieve Initial Stacks ---
             default_stack = 10000.0 # Fallback, should match factory config
             if hasattr(game_state, 'player_stacks') and game_state.player_stacks:
                  initial_stacks_hand = game_state.player_stacks[:] # Use copy
@@ -70,28 +68,42 @@ def worker_train_batch(args):
             if not initial_stacks_hand or len(initial_stacks_hand) != num_players:
                  initial_stacks_hand = [default_stack] * num_players
 
+            # --- **** START THE HAND **** ---
+            # Determine dealer position for this specific hand simulation
+            # Random dealer selection is suitable for training simulations
+            dealer_pos = random.randrange(num_players)
+            # Actually start the hand! This deals cards, posts blinds, and sets the first player.
+            game_state.start_new_hand(dealer_pos, initial_stacks_hand[:]) # Pass copy of stacks
+            # --- **** END START THE HAND **** ---
+
         except TypeError as te:
             # Catch if factory was called incorrectly (e.g., missing num_players arg)
             print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: TypeError Calling Factory: {te}")
             worker_failed_hands += 1
             continue
         except Exception as e:
-            print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Error Creating State via Factory: {type(e).__name__}: {e}")
+            # Catch errors during GameState creation OR start_new_hand
+            print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Error Creating/Starting State: {type(e).__name__}: {e}")
+            # import traceback # Uncomment for full traceback during debugging
+            # traceback.print_exc()
             worker_failed_hands += 1
             continue
 
-        # --- Check Initial State ---
+        # --- Check State AFTER Hand Start ---
         if game_state is None:
-            print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Factory returned None state.")
+            # This check might be redundant now with the try/except above, but keep for safety
+            print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: GameState is None after setup.")
             worker_failed_hands += 1
             continue
         if game_state.is_terminal():
-            print(f"!!! FAIL Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Immediately terminal state from factory.")
-            worker_failed_hands += 1
-            continue
+            # Hand might legitimately end during start_new_hand (e.g., insufficient players for blinds)
+            # print(f"INFO Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Immediately terminal state after start_new_hand.") # Reduce noise - optional info log
+            continue # Skip traversal for this terminal hand, not a failure
         if game_state.current_player_idx == -1 and not game_state.is_terminal():
-            # Allow if hand isn't terminal (e.g., all-in pre-deal) but log warning
-             print(f"!!! WARN Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Invalid current_player_idx (-1) from factory but not terminal.")
+            # This check is now more critical - indicates an internal failure in start_new_hand if true
+             print(f"!!! ERROR Worker {worker_id} Hand {hand_idx+1}/{batch_size}: Invalid current_player_idx (-1) AFTER start_new_hand but not terminal. State likely corrupt.")
+             worker_failed_hands += 1 # Count as failure
+             continue
 
 
         # --- Traverse perspectives ---
@@ -104,7 +116,7 @@ def worker_train_batch(args):
                     game_state=game_state.clone(),
                     reach_probs=initial_reach_probs.copy(),
                     perspective_player_idx=p_idx,
-                    initial_stacks=initial_stacks_hand[:],
+                    initial_stacks=initial_stacks_hand[:], # Pass the actual initial stacks for this hand
                     current_iteration_t=float(current_iteration_t),
                     local_regret_sum=local_regret_sum,
                     local_strategy_sum=local_strategy_sum,
@@ -116,6 +128,9 @@ def worker_train_batch(args):
                 break # Stop processing this hand if one perspective hits recursion limit
             except Exception as traverse_e:
                 print(f"!!! FAIL Worker {worker_id}: Error TRAVERSING P{p_idx}: {type(traverse_e).__name__}: {traverse_e}")
+                # Optionally print traceback for deeper debug
+                # import traceback
+                # traceback.print_exc()
                 perspective_failed = True
                 # Optionally break here too, depending on desired error handling
 
@@ -132,84 +147,127 @@ def _worker_cfr_traverse(game_state, reach_probs, perspective_player_idx,
                          initial_stacks, current_iteration_t,
                          local_regret_sum, local_strategy_sum, num_players,
                          current_depth=0): # Add depth tracking
-    """ Recursive CFR logic for worker (matches CFRTrainer closely). """
+    """ Recursive CFR logic for worker (matches CFRTrainer closely). (V10 ADD DEBUG LOG)"""
     # Use recursion limit from CFRTrainer class if available, else default
     WORKER_REC_LIMIT = getattr(CFRTrainer, 'RECURSION_DEPTH_LIMIT', 500) - 50 # Use buffer
+
+    # <<< START ADDED DEBUG LOG >>>
+    try:
+        # Safely format history and board
+        hist_str = ";".join(game_state.action_sequence[-5:]) if hasattr(game_state, 'action_sequence') and game_state.action_sequence else ""
+        board_str = "".join(map(str, game_state.community_cards)) if hasattr(game_state, 'community_cards') and game_state.community_cards else "-"
+        turn_str = str(game_state.current_player_idx) if hasattr(game_state, 'current_player_idx') else "ERR"
+        rnd_str = str(game_state.betting_round) if hasattr(game_state, 'betting_round') else "ERR"
+        print(f"DEBUG _traverse ENTRY: Depth={current_depth} Persp={perspective_player_idx} Turn={turn_str} Rnd={rnd_str} Board=[{board_str}] Hist=[{hist_str}]")
+    except Exception as log_e:
+        print(f"DEBUG _traverse ENTRY Log Err: {log_e}")
+    # <<< END ADDED DEBUG LOG >>>
 
     # --- Base Cases ---
     if game_state.is_terminal():
         utility = 0.0
         try:
             utility_val = game_state.get_utility(perspective_player_idx, initial_stacks)
-            utility = float(utility_val) if isinstance(utility_val, (int, float)) and not np.isnan(utility_val) and not np.isinf(utility_val) else 0.0
-        except Exception: pass # Default 0.0
+            # Ensure utility is a finite float
+            utility = float(utility_val) if isinstance(utility_val, (int, float)) and not (np.isnan(utility_val) or np.isinf(utility_val)) else 0.0
+        except Exception: pass # Default 0.0 on error
         return utility
 
     if current_depth > WORKER_REC_LIMIT:
+        # <<< ADDED DEBUG LOG BEFORE ERROR >>>
+        # Try to get acting player if possible for the log message
+        acting_player_debug = getattr(game_state, 'current_player_idx', 'N/A')
+        print(f"!!! DEBUG: Hitting Worker Recursion Limit at depth {current_depth} for P{acting_player_debug}")
+        # <<< END ADDED DEBUG LOG BEFORE ERROR >>>
         raise RecursionError(f"Worker depth limit {WORKER_REC_LIMIT} exceeded")
 
     # --- Handle Inactive Player ---
-    acting_player_idx = game_state.current_player_idx
-    if not (0 <= acting_player_idx < num_players): return 0.0 # Invalid index
+    acting_player_idx = getattr(game_state, 'current_player_idx', -1) # Default to -1 if attribute missing
 
-    # Safely check player state
-    is_folded = game_state.player_folded[acting_player_idx] if acting_player_idx < len(game_state.player_folded) else True
-    is_all_in = game_state.player_all_in[acting_player_idx] if acting_player_idx < len(game_state.player_all_in) else True
+    if not (0 <= acting_player_idx < num_players):
+        print(f"DEBUG _traverse RETURN: Invalid acting_player_idx {acting_player_idx}") # Log invalid index exit
+        return 0.0 # Invalid index
+
+    # Safely check player state using getattr with defaults
+    is_folded = getattr(game_state, 'player_folded', [True]*num_players)[acting_player_idx]
+    is_all_in = getattr(game_state, 'player_all_in', [True]*num_players)[acting_player_idx]
 
     if is_folded or is_all_in:
-        temp_state = game_state.clone()
-        original_turn_idx = temp_state.current_player_idx
-        try: temp_state._move_to_next_player()
-        except Exception: return 0.0 # Fail state
-
-        if temp_state.current_player_idx == original_turn_idx or temp_state.is_terminal():
-            utility = 0.0
-            try: utility_val = temp_state.get_utility(perspective_player_idx, initial_stacks); utility = float(utility_val) if isinstance(utility_val, (int,float)) and not (np.isnan(utility_val) or np.isinf(utility_val)) else 0.0
-            except Exception: pass
-            return utility
-        else:
-            # Recursive call, increment depth
-            return _worker_cfr_traverse(temp_state, reach_probs, perspective_player_idx, initial_stacks, current_iteration_t, local_regret_sum, local_strategy_sum, num_players, current_depth + 1)
+        # Create a clone to safely advance the turn
+        try:
+            temp_state = game_state.clone()
+            original_turn_idx = temp_state.current_player_idx
+            temp_state._move_to_next_player()
+            # Check if moving the turn didn't work or resulted in a terminal state
+            if temp_state.current_player_idx == original_turn_idx or temp_state.is_terminal():
+                utility = 0.0
+                try:
+                    utility_val = temp_state.get_utility(perspective_player_idx, initial_stacks)
+                    utility = float(utility_val) if isinstance(utility_val, (int,float)) and not (np.isnan(utility_val) or np.isinf(utility_val)) else 0.0
+                except Exception: pass
+                return utility
+            else:
+                # <<< ADDED DEBUG LOG (Optional) >>>
+                # print(f"  Skipping P{acting_player_idx} (Inactive) -> Recursing (Depth {current_depth+1})")
+                # <<< END ADDED DEBUG LOG >>>
+                # Recursive call, increment depth
+                return _worker_cfr_traverse(temp_state, reach_probs, perspective_player_idx, initial_stacks, current_iteration_t, local_regret_sum, local_strategy_sum, num_players, current_depth + 1)
+        except Exception as skip_e:
+            print(f"DEBUG _traverse RETURN: Error cloning/skipping inactive P{acting_player_idx}: {skip_e}")
+            return 0.0 # Return neutral value if skipping fails
 
     # --- Active Player: Key, Actions, Strategy ---
     try: # Get InfoSet Key
         info_set_key = generate_info_set_key(game_state, acting_player_idx)
-        if not info_set_key or not isinstance(info_set_key, str): raise ValueError("Invalid key")
-    except Exception: return 0.0
+        if not info_set_key or not isinstance(info_set_key, str): raise ValueError("Invalid key generated")
+    except Exception as key_e:
+        print(f"DEBUG _traverse RETURN: KeyGen Error P{acting_player_idx} Depth {current_depth}: {key_e}")
+        return 0.0
 
     try: # Get Actions (Handle Abstraction)
         raw_actions = game_state.get_available_actions()
-        # *** IMPORTANT: Worker needs consistent abstraction setting ***
-        # This should ideally be passed via args or config if it can vary.
-        # Assuming a default value for now.
-        USE_ACTION_ABSTRACTION_IN_WORKER = True # Replace with actual config if needed
+        # *** IMPORTANT: Configure abstraction consistently ***
+        # This should ideally be passed via args or read from a shared config
+        USE_ACTION_ABSTRACTION_IN_WORKER = True # Assume default
         if USE_ACTION_ABSTRACTION_IN_WORKER:
             available_actions = ActionAbstraction.abstract_actions(raw_actions, game_state)
         else:
             available_actions = raw_actions
-    except Exception: return 0.0 # Fail on action error
-    if not isinstance(available_actions, list): available_actions = []
+        # Validate result
+        if not isinstance(available_actions, list): available_actions = []
 
-    # Handle no available actions
+    except Exception as action_e:
+        print(f"DEBUG _traverse RETURN: GetActions Error P{acting_player_idx} Depth {current_depth}: {action_e}")
+        return 0.0 # Fail on action error
+
+    # Handle no available actions (game should be terminal, but check explicitly)
     if not available_actions:
         utility = 0.0
-        try: utility_val = game_state.get_utility(perspective_player_idx, initial_stacks); utility = float(utility_val) if isinstance(utility_val, (int, float)) and not (np.isnan(utility_val) or np.isinf(utility_val)) else 0.0
+        try:
+            utility_val = game_state.get_utility(perspective_player_idx, initial_stacks)
+            utility = float(utility_val) if isinstance(utility_val, (int, float)) and not (np.isnan(utility_val) or np.isinf(utility_val)) else 0.0
         except Exception: pass
         return utility
 
     # --- Get Strategy from LOCAL sums ---
+    # (Make sure 'collections' is imported at the top of the file)
     regrets = local_regret_sum.get(info_set_key, {}) # Use .get for safety
     strategy = {}
     positive_regret_sum = 0.0
     action_positive_regrets = {}
     for action in available_actions:
         regret = regrets.get(action, 0.0)
+        # Ensure regret is a valid number
+        regret = regret if isinstance(regret, (int, float)) and not (np.isnan(regret) or np.isinf(regret)) else 0.0
         positive_regret = max(0.0, regret)
         action_positive_regrets[action] = positive_regret
         positive_regret_sum += positive_regret
     # Normalize or use uniform
-    if positive_regret_sum > 1e-9:
-        strategy = {action: action_positive_regrets[action] / positive_regret_sum for action in available_actions}
+    if positive_regret_sum > 1e-9: # Use tolerance for float comparison
+        try:
+            strategy = {action: action_positive_regrets[action] / positive_regret_sum for action in available_actions}
+        except ZeroDivisionError: # Should not happen with the > 1e-9 check, but safeguard
+             strategy = {action: 1.0 / len(available_actions) for action in available_actions} if available_actions else {}
     else:
         num_act = len(available_actions)
         prob = 1.0 / num_act if num_act > 0 else 0.0
@@ -217,85 +275,133 @@ def _worker_cfr_traverse(game_state, reach_probs, perspective_player_idx,
 
     # --- Explore Actions ---
     node_utility_perspective = 0.0
-    action_utilities_perspective = {}
+    action_utilities_perspective = {} # Store utility received AFTER taking action 'a'
     for action in available_actions:
         action_prob = strategy.get(action, 0.0)
+        # Skip actions with negligible probability
         if action_prob < 1e-9:
-            action_utilities_perspective[action] = None; continue
+            action_utilities_perspective[action] = None # Mark as not explored
+            continue
 
-        try: next_game_state = game_state.apply_action(action)
-        except Exception: action_utilities_perspective[action] = None; continue
+        # Apply Action (safely)
+        try:
+            next_game_state = game_state.apply_action(action)
+        except Exception as apply_e:
+            # If applying action fails, skip this path
+            print(f"DEBUG _traverse SKIP ACTION: ApplyAction Error P{acting_player_idx} Depth {current_depth} Action {action}: {apply_e}")
+            action_utilities_perspective[action] = None # Mark as failed
+            continue
 
-        # Update Opponent Reach Prob
+        # Update Opponent Reach Probability
         next_reach_probs = reach_probs.copy()
-        if acting_player_idx != perspective_player_idx:
+        if acting_player_idx != perspective_player_idx: # Update opponent reach
             prob_factor = float(action_prob) if isinstance(action_prob,(int,float)) and not(np.isnan(action_prob)or np.isinf(action_prob)) else 0.0
             current_reach = float(next_reach_probs[acting_player_idx]) if acting_player_idx < len(next_reach_probs) and isinstance(next_reach_probs[acting_player_idx],(int,float)) and not(np.isnan(next_reach_probs[acting_player_idx])or np.isinf(next_reach_probs[acting_player_idx])) else 0.0
-            updated_reach = np.clip(current_reach * prob_factor, 0.0, 1.0)
+            updated_reach = np.clip(current_reach * prob_factor, 0.0, 1.0) # Clip to handle float issues
             next_reach_probs[acting_player_idx] = updated_reach
 
-        # Recursive Call
+        # --- Recursive Call ---
         try:
+            # <<< START ADDED DEBUG LOGGING for recursion >>>
+            # Safely format relevant info from the *next* state before calling
+            next_hist_str = ";".join(next_game_state.action_sequence[-5:]) if hasattr(next_game_state, 'action_sequence') and next_game_state.action_sequence else ""
+            next_board_str = "".join(map(str, next_game_state.community_cards)) if hasattr(next_game_state, 'community_cards') and next_game_state.community_cards else "-"
+            next_turn_str = str(next_game_state.current_player_idx) if hasattr(next_game_state, 'current_player_idx') else "ERR"
+            next_rnd_str = str(next_game_state.betting_round) if hasattr(next_game_state, 'betting_round') else "ERR"
+            state_info_for_log = f"P{acting_player_idx}-Act={action} -> Depth={current_depth+1} Persp={perspective_player_idx} Turn={next_turn_str} Rnd={next_rnd_str} Board=[{next_board_str}] Hist=[{next_hist_str}]"
+            print(f"  Recursing: {state_info_for_log}") # Print info BEFORE the call
+            # <<< END ADDED DEBUG LOGGING for recursion >>>
+
             utility_from_action = _worker_cfr_traverse(
                 next_game_state, next_reach_probs, perspective_player_idx,
                 initial_stacks, current_iteration_t, local_regret_sum,
                 local_strategy_sum, num_players, current_depth + 1 # Increment depth
             )
+            # Validate utility from recursion
+            utility_from_action = float(utility_from_action) if isinstance(utility_from_action, (int, float)) and not (np.isnan(utility_from_action) or np.isinf(utility_from_action)) else 0.0
             action_utilities_perspective[action] = utility_from_action
-            # Accumulate node utility safely
-            if isinstance(utility_from_action, (int, float)) and not (np.isnan(utility_from_action) or np.isinf(utility_from_action)):
-                 node_utility_perspective += action_prob * utility_from_action
-        except RecursionError as re_inner: raise re_inner # Propagate recursion error
-        except Exception: action_utilities_perspective[action] = None # Mark other errors
+
+            # Accumulate node utility weighted by action probability
+            node_utility_perspective += action_prob * utility_from_action
+
+        except RecursionError as re_inner:
+            # Propagate recursion error up immediately
+            raise re_inner
+        except Exception as rec_e:
+            print(f"DEBUG _traverse Error during recursive call for action {action}: {rec_e}")
+            action_utilities_perspective[action] = None # Mark recursive call as failed
+
+        # --- End Recursive Call Section ---
+
 
     # --- Update LOCAL Sums (If Perspective Player Acting) ---
     if acting_player_idx == perspective_player_idx:
-        # Calculate values safely
+        # Calculate opponent reach product safely
         safe_reach = np.nan_to_num(reach_probs, nan=0.0, posinf=0.0, neginf=0.0)
         opp_reach_prod = 1.0
         if num_players > 1:
             opp_reaches = [safe_reach[p] for p in range(num_players) if p != perspective_player_idx]
-            try: temp_prod = np.prod(opp_reaches) if opp_reaches else 1.0; opp_reach_prod = float(temp_prod) if isinstance(temp_prod,(int,float)) and not (np.isnan(temp_prod) or np.isinf(temp_prod)) else 0.0
-            except Exception: opp_reach_prod = 0.0
+            try:
+                # Ensure values are valid before prod
+                valid_opp_reaches = [r for r in opp_reaches if isinstance(r, (int, float)) and not (np.isnan(r) or np.isinf(r))]
+                temp_prod = np.prod(valid_opp_reaches) if valid_opp_reaches else 1.0
+                opp_reach_prod = float(temp_prod) if isinstance(temp_prod,(int,float)) and not (np.isnan(temp_prod) or np.isinf(temp_prod)) else 0.0
+            except Exception: opp_reach_prod = 0.0 # Default to 0 on error
 
+        # Get player reach probability safely
         player_reach_prob = float(safe_reach[perspective_player_idx]) if perspective_player_idx < len(safe_reach) and isinstance(safe_reach[perspective_player_idx],(int,float)) and not(np.isnan(safe_reach[perspective_player_idx])or np.isinf(safe_reach[perspective_player_idx])) else 0.0
+        # Validate node utility
         node_util_val = float(node_utility_perspective) if isinstance(node_utility_perspective, (int, float)) and not (np.isnan(node_utility_perspective) or np.isinf(node_utility_perspective)) else 0.0
 
-        # Only update if path reachable by opponents
-        if opp_reach_prod > 1e-12:
-            # Update Regrets
+        # Only update if path reachable by opponents (avoid unnecessary computation/potential NaNs)
+        if opp_reach_prod > 1e-12: # Use tolerance
+            # Ensure local sums are initialized correctly (should use setdefault)
             current_info_set_regrets = local_regret_sum.setdefault(info_set_key, collections.defaultdict(float))
+            current_info_set_strategy_sum = local_strategy_sum.setdefault(info_set_key, collections.defaultdict(float))
+
+            # Update Regrets
             for action in available_actions:
                 utility_a = action_utilities_perspective.get(action)
-                if utility_a is None or not isinstance(utility_a, (int, float)) or np.isnan(utility_a) or np.isinf(utility_a): continue
+                # Skip if action wasn't explored or recursive call failed
+                if utility_a is None or not isinstance(utility_a, (int, float)) or np.isnan(utility_a) or np.isinf(utility_a):
+                    continue
 
                 instant_regret = utility_a - node_util_val
-                if np.isnan(instant_regret) or np.isinf(instant_regret): continue
+                # Skip if calculation results in invalid number
+                if np.isnan(instant_regret) or np.isinf(instant_regret):
+                    continue
 
+                # Get current regret, ensure it's a valid float
                 current_regret = float(current_info_set_regrets.get(action, 0.0))
                 if np.isnan(current_regret) or np.isinf(current_regret): current_regret = 0.0
 
+                # Calculate and apply increment safely
                 regret_inc = opp_reach_prod * instant_regret
                 updated_regret = current_regret
-                if not (np.isnan(regret_inc) or np.isinf(regret_inc)): updated_regret += regret_inc
+                if not (np.isnan(regret_inc) or np.isinf(regret_inc)):
+                    updated_regret += regret_inc
 
-                current_info_set_regrets[action] = max(0.0, updated_regret) # Floor at 0
+                # Update regret, flooring at 0
+                current_info_set_regrets[action] = max(0.0, updated_regret)
 
-            # Update Strategy Sum
-            current_info_set_strategy_sum = local_strategy_sum.setdefault(info_set_key, collections.defaultdict(float))
-            strategy_sum_weight = player_reach_prob * current_iteration_t # Linear CFR weight
+            # Update Strategy Sum (Linear CFR weight: player_reach * iteration_number)
+            strategy_sum_weight = player_reach_prob * float(current_iteration_t) # Make sure weight is float
+            # Skip update if weight is invalid
             if not (np.isnan(strategy_sum_weight) or np.isinf(strategy_sum_weight)):
                 for action in available_actions:
                     action_prob = strategy.get(action, 0.0)
                     increment = strategy_sum_weight * action_prob
+                    # Get current sum safely
                     current_sum = float(current_info_set_strategy_sum.get(action, 0.0))
                     if np.isnan(current_sum) or np.isinf(current_sum): current_sum = 0.0
 
+                    # Apply increment safely
                     if not (np.isnan(increment) or np.isinf(increment)):
                          current_info_set_strategy_sum[action] = current_sum + increment
 
-    # --- Return Node EV ---
+    # --- Return Node EV for the perspective player ---
     final_utility = float(node_utility_perspective) if isinstance(node_utility_perspective, (int, float)) and not (np.isnan(node_utility_perspective) or np.isinf(node_utility_perspective)) else 0.0
+    #print(f"DEBUG _traverse RETURN: Depth={current_depth} Persp={perspective_player_idx} Util={final_utility}") # Log final utility
     return final_utility
 
 

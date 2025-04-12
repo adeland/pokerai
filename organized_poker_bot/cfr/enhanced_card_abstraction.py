@@ -123,7 +123,7 @@ class EnhancedCardAbstraction:
         current_model = cls._preflop_model # Get potential model object
 
         if model_loaded_successfully and isinstance(current_model, KMeans):
-            cls._log("Using K-Means model for preflop abstraction.", "DEBUG")
+            #cls._log("Using K-Means model for preflop abstraction.", "DEBUG")
             try:
                 features = cls._extract_preflop_features(hole_cards)
                 if not features: # Check if feature extraction failed
@@ -200,7 +200,7 @@ class EnhancedCardAbstraction:
 
         # Use model if available and loaded correctly
         if model_loaded_successfully and isinstance(model, KMeans):
-            cls._log(f"Using K-Means model for {street_name} abstraction.", "DEBUG")
+            #cls._log(f"Using K-Means model for {street_name} abstraction.", "DEBUG")
             try:
                 features = cls._extract_postflop_features(hole_cards, community_cards)
                 if not features: # Check feature extraction result
@@ -624,7 +624,7 @@ if __name__ == '__main__':
     c_river = c_turn + [Card(11, 'c')] # River Jc
 
     # Get abstractions (lazy loading should happen here if models trained/exist)
-    EnhancedCardAbstraction.DETAILED_LOGGING = True # Enable detailed logs for example usage
+    EnhancedCardAbstraction.DETAILED_LOGGING = False # Enable detailed logs for example usage
     pre_b = EnhancedCardAbstraction.get_preflop_abstraction(h)
     print(f"\nPreflop Bucket for {' '.join(map(str, h))}: {pre_b}")
 
